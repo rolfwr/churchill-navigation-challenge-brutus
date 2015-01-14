@@ -5,6 +5,9 @@
 #include <iostream>
 #include <limits>
 #include <cmath>
+#include <stack>
+#include <queue>
+//#include "immintrin.h"
 
 #define NDUMP 1
 
@@ -29,99 +32,102 @@ struct rawpoint
     int8_t id;
 };
 
+struct block {
+    float xs[4];
+    float ys[4];
+    uint32_t rankid[4];
+    uint32_t children[4];
+};
 
 struct SearchContext {
     std::vector<Point> points;
+    std::vector<block> blocks;
 };
 
 
+uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
+    auto count = std::min((int)std::distance(begin, end), 4);
+    if (count == 0) {
+        return 0;
+    }
+
+    uint32_t result = (uint32_t)sc.blocks.size();
+    sc.blocks.push_back(block{});
+    block& b = sc.blocks.back();
+    b.xs[0] = std::numeric_limits<float>::max();
+    b.xs[1] = std::numeric_limits<float>::max();
+    b.xs[2] = std::numeric_limits<float>::max();
+    b.xs[3] = std::numeric_limits<float>::max();
+
+    for (int i = 0; i < count; ++i) {
+        Point& p = *begin++;
+
+        b.xs[i] = p.x;
+        b.ys[i] = p.y;
+        b.rankid[i] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
+    }
+
+    if (count == 4) {
+        float sepx = b.xs[3];
+        float sepy = b.ys[3];
+
+        Point* xsplit = std::stable_partition(begin, end, [=](const Point& pt) {
+            return pt.x < sepx;
+        });
+
+        Point* ysplit1 = std::stable_partition(begin, xsplit, [=](const Point& pt) {
+            return pt.y < sepy;
+        });
+
+        Point* ysplit2 = std::stable_partition(xsplit, end, [=](const Point& pt) {
+            return pt.y < sepy;
+        });
+
+        uint32_t b0 = enblock(sc, begin, ysplit1);
+        uint32_t b1 = enblock(sc, ysplit1, xsplit);
+        uint32_t b2 = enblock(sc, xsplit, ysplit2);
+        uint32_t b3 = enblock(sc, ysplit2, end);
+        
+        block& parent = sc.blocks[result];
+        parent.children[0] = b0;
+        parent.children[1] = b1;
+        parent.children[2] = b2;
+        parent.children[3] = b3;
+    }
+
+    return result;
+}
 
 extern "C" {
 
+
 __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin, const Point* points_end) {
 
-
+    assert(sizeof(block) == 64);
     auto sc = new SearchContext();
 
     auto count = std::distance(points_begin, points_end);
-    
-    int stride = count / 20;
-
-#ifdef DUMP
-    for (int i = 0; i < count; i += stride) {
-        std::cout << "[" << i << "] id=" << ((uint32_t)(uint8_t)points_begin[i].id) << ", rank=" << points_begin[i].rank << ", x=" << points_begin[i].x << ", y=" << points_begin[i].y << "\n";
-    }
-#endif
-
     sc->points.resize(count);
     std::copy(points_begin, points_end, sc->points.begin());
     std::sort(sc->points.begin(), sc->points.end(), [](const Point& a, const Point& b) {
         return a.rank < b.rank;
     });
 
-#ifdef DUMP
-    float xmin = std::numeric_limits<float>::max();
-    float ymin = std::numeric_limits<float>::max();
-    float xmax = std::numeric_limits<float>::lowest();
-    float ymax = std::numeric_limits<float>::lowest();
+    int bindex = enblock(*sc, &sc->points.data()[0], &sc->points.data()[count]);
+    assert(bindex == 0);
+    assert(sc->blocks.size() >= (size_t)(count / 4));
 
-    int histogram[256] = {};
+    
 
-    for (int i = 0; i < count; ++i) {
-        const Point& point = points_begin[i];
-
-        // Outlier check.
-        if (point.x < -1e+9 || point.x > 1e+9 || point.y < -1e+9 || point.y > 1e+9) {
-            continue;
-        }
-
-        if (point.x < xmin) {
-            xmin = point.x;
-        }
-
-        if (point.x > xmax) {
-            xmax = point.x;
-        }
-
-        if (point.y < ymin) {
-            ymin = point.y;
-        }
-
-        if (point.y > ymax) {
-            ymax = point.y;
-        }
-
-        int exp;
-        frexp(point.x, &exp);
-        int index = exp + 100;
-        histogram[index]++;
-    }
-
-    float scale = 255.0 / (nextafterf(xmax, std::numeric_limits<float>::max()) - xmin);
+    std::sort(sc->points.begin(), sc->points.end(), [](const Point& a, const Point& b) {
+        return a.rank < b.rank;
+    });
 
 
-    for (int i = 0; i < count; ++i) {
-        const Point& point = points_begin[i];
-
-        // Outlier check.
-        if (point.x < -1e+9 || point.x > 1e+9 || point.y < -1e+9 || point.y > 1e+9) {
-            continue;
-        }
-
-        int index = (int)((point.x - xmin) * scale);
-        histogram[index]++;
-    }
-
-    std::cout << "\n\nRange: x~[" << xmin << "," << xmax << "], y~[" << ymin << "," << ymax << "]\n";
-
-    for (int i = 0; i < 256; ++i) {
-        std::cout << "bucket " << i << " : " << histogram[i] << "\n";
-    }
-#endif
     return sc;
 };
 
-__declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
     auto end = sc->points.cend();
     auto pos = sc->points.cbegin();
     auto outptr = out_points;
@@ -137,17 +143,82 @@ __declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rec
     }
     auto result = (int32_t)std::distance(out_points, outptr);
 
-#ifdef DUMP
-    static int i = 0;
-    const int stride = 100;
-    if ((++i) % stride == 0) {
-        float dx = rect.hx - rect.lx;
-        float dy = rect.hy - rect.ly;
-        std::cout << result << ", count=" << count << ", lx=" << rect.lx << ", hx=" << rect.hx << ", ly=" << rect.ly << ", hy=" << rect.hy << ", " << dx << "*" << dy << "\n";
+    return result;
+};
+
+int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+    if (sc->blocks.empty()) {
+        return 0;
     }
+
+    std::stack<uint32_t> remaining;
+    auto comp = [](const Point& a, const Point& b) {
+        return a.rank < b.rank;
+    };
+
+    std::priority_queue<Point, std::vector<Point>, decltype(comp)> best;
+    Point bad;
+    bad.rank = std::numeric_limits<int32_t>::max();
+    for (int i = 0; i < count; ++i) {
+        best.push(bad);
+    }
+ 
+    remaining.push(0);
+    while (!remaining.empty()) {
+        block& b = sc->blocks[remaining.top()];
+        remaining.pop();
+        bool seen_better = false;
+        for (int i = 0; i < 4; ++i) {
+            float x = b.xs[i];
+            float y = b.ys[i];
+            int32_t rank = b.rankid[i] >> 8;
+            if (best.top().rank > rank) {
+                seen_better = true;
+                if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
+                    best.pop();
+                    best.push(Point{ (int8_t)(b.rankid[i] & 0xFF), rank, x, y });
+                }
+            }
+        }
+
+        if (seen_better) {
+            for (int i = 0; i < 4; ++i) {
+                uint32_t child = b.children[i];
+                if (child != 0) {
+                    remaining.push(child);
+                }
+            }
+        }
+    }
+
+    while ((!best.empty()) && best.top().rank == std::numeric_limits<int32_t>::max()) {
+        best.pop();
+    }
+
+    uint32_t result = (uint32_t)best.size();
+    for (int i = ((int)result) - 1; i >= 0; --i) {
+        out_points[i] = best.top();
+        best.pop();
+    }
+
+    return result;
+};
+
+
+__declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+#ifdef DEBUG
+    std::vector<Point> goodbuf(count);
+    auto goodresult = search_good(sc, rect, count, &goodbuf.front());
+#endif
+    auto result = search_alt(sc, rect, count, out_points);
+
+#ifdef DEBUG
+    assert(result == goodresult);
+    assert(memcmp(goodbuf.data(), out_points, result * sizeof(Point)) == 0);
 #endif
     return result;
 };
+
 
 __declspec(dllexport) SearchContext* __stdcall destroy(SearchContext* sc) {
     delete sc;
