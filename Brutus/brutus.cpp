@@ -32,7 +32,7 @@ struct rawpoint
     int8_t id;
 };
 
-struct block {
+struct __declspec(align(64)) block {
     float xs[4];
     float ys[4];
     uint32_t rankid[4];
@@ -42,6 +42,8 @@ struct block {
 struct SearchContext {
     std::vector<Point> points;
     std::vector<block> blocks;
+    block* aligned_begin;
+    block* aligned_end;
 };
 
 enum quadrant : int {
@@ -124,12 +126,19 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / 4));
 
-    
+    sc->aligned_begin = (block*)_aligned_malloc(sc->blocks.size() * sizeof(block), 64);
+    assert(count == 0 || ((((uint32_t)(void*)sc->aligned_begin % 64) == 0)));
+    sc->aligned_end = sc->aligned_begin + sc->blocks.size();
+    std::memcpy(sc->aligned_begin, &sc->blocks.data()[0], sc->blocks.size() * sizeof(block));
+    sc->blocks.clear();
 
+#ifdef NDEBUG
+    sc->points.clear();
+#else
     std::sort(sc->points.begin(), sc->points.end(), [](const Point& a, const Point& b) {
         return a.rank < b.rank;
     });
-
+#endif
 
     return sc;
 };
@@ -154,11 +163,11 @@ int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t 
 };
 
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
-    if (sc->blocks.empty()) {
+    if (sc->aligned_begin == sc->aligned_end) {
         return 0;
     }
-    int scanned = 0;
-    std::stack<uint32_t> remaining;
+
+    std::deque<uint32_t> remaining;
     auto comp = [](const Point& a, const Point& b) {
         return a.rank < b.rank;
     };
@@ -170,11 +179,10 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         best.push(bad);
     }
  
-    remaining.push(0);
+    remaining.push_back(0);
     while (!remaining.empty()) {
-        block& b = sc->blocks[remaining.top()];
-        remaining.pop();
-        ++scanned;
+        block& b = sc->aligned_begin[remaining.front()];
+        remaining.pop_front();
         bool seen_better = false;
         for (int i = 0; i < 4; ++i) {
             float x = b.xs[i];
@@ -198,19 +206,19 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
             bool ishy = rect.hy >= y;
 
             if (islx && isly && b.children[lxly]) {
-                remaining.push(b.children[lxly]);
+                remaining.push_back(b.children[lxly]);
             }
 
             if (islx && ishy && b.children[lxhy]) {
-                remaining.push(b.children[lxhy]);
+                remaining.push_back(b.children[lxhy]);
             }
 
             if (ishx && isly && b.children[hxly]) {
-                remaining.push(b.children[hxly]);
+                remaining.push_back(b.children[hxly]);
             }
 
             if (ishx && ishy && b.children[hxhy]) {
-                remaining.push(b.children[hxhy]);
+                remaining.push_back(b.children[hxhy]);
             }
         }
     }
