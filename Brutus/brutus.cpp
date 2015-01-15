@@ -11,32 +11,17 @@
 
 #define NDUMP 1
 
-struct rawpoint
-{
-    rawpoint(const Point& point)
-        : rank(point.rank),
-        x(reinterpret_cast<const int32_t&>(point.x)),
-        y(reinterpret_cast<const int32_t&>(point.y)),
-        id(point.id)
-    {
+// It's too early to nail down how many points per block we should have.
+// Timing of some higher seems to on average be better, but also vary
+// greatly between runs.
+const int points_per_block = 4;
 
-    }
-
-    Point get() const {
-        return Point{ id, rank, reinterpret_cast<const float&>(x), reinterpret_cast<const float&>(x) };
-    }
-
-    int32_t rank;
-    int32_t x;
-    int32_t y;
-    int8_t id;
-};
-
-struct __declspec(align(64)) block {
-    float xs[4];
-    float ys[4];
-    uint32_t rankid[4];
+struct block {
+    float xs[points_per_block];
+    float ys[points_per_block];
+    uint32_t rankid[points_per_block];
     uint32_t children[4];
+    uint32_t pad;
 };
 
 struct SearchContext {
@@ -53,9 +38,19 @@ enum quadrant : int {
     hxhy = 3
 };
 
+float median(std::vector<float>& values) {
+    std::sort(values.begin(), values.end());
+
+    auto size = values.size();
+    if (size % 2 == 1) {
+        return values[size / 2];
+    }
+
+    return (values[size / 2 - 1] + values[size / 2]) / 2;
+}
 
 uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
-    auto count = std::min((int)std::distance(begin, end), 4);
+    auto count = std::min((int)std::distance(begin, end), points_per_block);
     if (count == 0) {
         return 0;
     }
@@ -63,22 +58,52 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
     uint32_t result = (uint32_t)sc.blocks.size();
     sc.blocks.push_back(block{});
     block& b = sc.blocks.back();
-    b.xs[0] = std::numeric_limits<float>::max();
-    b.xs[1] = std::numeric_limits<float>::max();
-    b.xs[2] = std::numeric_limits<float>::max();
-    b.xs[3] = std::numeric_limits<float>::max();
+
+    std::vector<Point> candidates(begin, begin + count);
+    begin += count;
+
+    for (int i = 0; i < points_per_block; ++i) {
+        b.xs[i] = std::numeric_limits<float>::max();
+    }
+
+    // Find centermost point in the list of candidate points.
+    std::vector<float> xsort(count);
+    std::vector<float> ysort(count);
+    for (int i = 0; i < count; ++i) {
+        xsort[i] = candidates[i].x;
+        ysort[i] = candidates[i].y;
+    }
+
+    float medianx = median(xsort);
+    float mediany = median(ysort);
+
+    float bestdist = std::numeric_limits<float>::max();
+    int bestindex = -1;
+    for (int i = 0; i < count; ++i) {
+        float dist = abs(medianx - candidates[i].x) + abs(mediany - candidates[i].y);
+
+        if (dist < bestdist) {
+            bestdist = dist;
+            bestindex = i;
+        }
+    }
+
+    // Move most center point to end of block.
+    if (bestindex != count - 1) {
+        std::swap(candidates[bestindex], candidates[count - 1]);
+    }
 
     for (int i = 0; i < count; ++i) {
-        Point& p = *begin++;
+        Point& p = candidates[i];
 
         b.xs[i] = p.x;
         b.ys[i] = p.y;
         b.rankid[i] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
     }
 
-    if (count == 4) {
-        float sepx = b.xs[3];
-        float sepy = b.ys[3];
+    if (count == points_per_block) {
+        float sepx = b.xs[points_per_block - 1];
+        float sepy = b.ys[points_per_block - 1];
 
         Point* xsplit = std::stable_partition(begin, end, [=](const Point& pt) {
             return pt.x < sepx;
@@ -112,7 +137,7 @@ extern "C" {
 
 __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin, const Point* points_end) {
 
-    assert(sizeof(block) == 64);
+    //assert((sizeof(block) % 64) == 0);
     auto sc = new SearchContext();
 
     auto count = std::distance(points_begin, points_end);
@@ -124,7 +149,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
 
     int bindex = enblock(*sc, &sc->points.data()[0], &sc->points.data()[count]);
     assert(bindex == 0);
-    assert(sc->blocks.size() >= (size_t)(count / 4));
+    assert(sc->blocks.size() >= (size_t)(count / points_per_block));
 
     sc->aligned_begin = (block*)_aligned_malloc(sc->blocks.size() * sizeof(block), 64);
     assert(count == 0 || ((((uint32_t)(void*)sc->aligned_begin % 64) == 0)));
@@ -184,7 +209,7 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         block& b = sc->aligned_begin[remaining.front()];
         remaining.pop_front();
         bool seen_better = false;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < points_per_block; ++i) {
             float x = b.xs[i];
             float y = b.ys[i];
             int32_t rank = b.rankid[i] >> 8;
@@ -198,8 +223,8 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         }
 
         if (seen_better) {
-            float x = b.xs[3];
-            float y = b.ys[3];
+            float x = b.xs[points_per_block - 1];
+            float y = b.ys[points_per_block - 1];
             bool islx = rect.lx < x;
             bool ishx = rect.hx >= x;
             bool isly = rect.ly < y;
