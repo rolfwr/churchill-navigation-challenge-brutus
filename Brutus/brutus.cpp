@@ -172,11 +172,15 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / points_per_block));
 
-    sc->aligned_begin = (block*)_aligned_malloc(sc->blocks.size() * sizeof(block), 64);
-    assert(count == 0 || ((((uint32_t)(void*)sc->aligned_begin % 64) == 0)));
-    sc->aligned_end = sc->aligned_begin + sc->blocks.size();
-    std::memcpy(sc->aligned_begin, &sc->blocks.data()[0], sc->blocks.size() * sizeof(block));
-    sc->blocks.clear();
+    size_t blockcount = sc->blocks.size();
+    sc->blocks.push_back(block{}); // alignment padding;
+
+    size_t begin = (size_t)(&sc->blocks.data()[0]);
+    size_t aligned = (begin + 63) & ~((size_t)63);
+
+    std::memmove((void*)aligned, (void*)begin, blockcount * sizeof(block));
+    sc->aligned_begin = (block*) aligned;
+    sc->aligned_end = sc->aligned_begin + blockcount;
 
 #ifdef NDEBUG
     sc->points.clear();
@@ -271,7 +275,10 @@ static __forceinline void push_heap(Point* heap, int lastpos, int8_t newid, int3
 
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
-    if (sc->aligned_begin == sc->aligned_end) {
+    const block* aligned_begin = sc->aligned_begin;
+    const block* aligned_end = sc->aligned_end;
+
+    if (aligned_begin == aligned_end) {
         return 0;
     }
 
@@ -286,7 +293,7 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
     remaining.push_back(0);
     while (!remaining.empty()) {
 
-        block& b = sc->aligned_begin[remaining.front()];
+        const block& b = aligned_begin[remaining.front()];
         remaining.pop_front();
         bool seen_better = false;
         for (int i = 0; i < points_per_block; ++i) {
