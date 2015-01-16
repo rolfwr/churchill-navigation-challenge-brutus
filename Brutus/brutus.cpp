@@ -208,25 +208,84 @@ int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t 
     return result;
 };
 
-int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+static __forceinline int32_t& getrank(char* p) {
+    return *((int32_t*)(p + offsetof(Point,rank)));
+}
+
+static __forceinline void pop_heap_raw(char* heap, int count) {
+    int end = (count - 1) * sizeof(Point);
+
+    int32_t value = getrank(heap + end);
+    // Find insert point.
+    int i = 0;
+    int c1;
+    while (true) {
+        c1 = i * 2 + sizeof(Point) * 1;
+        int c2 = i * 2 + sizeof(Point) * 2;
+        if (c1 >= end) {
+            goto insert;
+        }
+
+        if (c2 >= end) {
+            goto last;
+        }
+
+        int highc = (getrank(heap + c2) > getrank(heap + c1)) ? c2 : c1;
+
+        if (value >= getrank(heap + highc)) {
+            goto insert;
+        }
+
+        memcpy(heap + i, heap + highc, sizeof(Point));
+        i = highc;
+    }
+
+last:
+    if (value < getrank(heap + c1)) {
+        memcpy(heap + i, heap + c1, sizeof(Point));
+        i = c1;
+    }
+
+insert:
+    memcpy(heap + i, heap + end, sizeof(Point));
+}
+
+static __forceinline void push_heap(Point* heap, int lastpos, int8_t newid, int32_t newrank, float x, float y) {
+    assert(lastpos != 0);
+    do {
+        int parent = (lastpos - 1) / 2;
+        if (heap[parent].rank >= newrank) {
+            break;
+        }
+
+        heap[lastpos] = heap[parent];
+        lastpos = parent;
+    } while (lastpos != 0);
+
+    
+    heap[lastpos].id = newid;
+    heap[lastpos].rank = newrank;
+    heap[lastpos].x = x;
+    heap[lastpos].y = y;
+}
+
+int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
+{
     if (sc->aligned_begin == sc->aligned_end) {
         return 0;
     }
 
-    std::deque<uint32_t> remaining;
-    auto comp = [](const Point& a, const Point& b) {
-        return a.rank < b.rank;
-    };
+    Point* bestheap = (Point*)alloca(count * sizeof(Point));
 
-    std::priority_queue<Point, std::vector<Point>, decltype(comp)> best;
-    Point bad;
-    bad.rank = std::numeric_limits<int32_t>::max();
+    // TODO: A deque size of 1000 should be sifficient for most workloads.
+    std::deque<uint32_t> remaining;
     for (int i = 0; i < count; ++i) {
-        best.push(bad);
+        bestheap[i].rank = std::numeric_limits<int32_t>::max();
     }
  
     remaining.push_back(0);
     while (!remaining.empty()) {
+
         block& b = sc->aligned_begin[remaining.front()];
         remaining.pop_front();
         bool seen_better = false;
@@ -234,11 +293,11 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
             float x = b.xs[i];
             float y = b.ys[i];
             int32_t rank = b.rankid[i] >> 8;
-            if (best.top().rank > rank) {
+            if (bestheap->rank > rank) {
                 seen_better = true;
                 if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
-                    best.pop();
-                    best.push(Point{ (int8_t)(b.rankid[i] & 0xFF), rank, x, y });
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, (int8_t)(b.rankid[i] & 0xFF), rank, x, y);
                 }
             }
         }
@@ -269,14 +328,17 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         }
     }
 
-    while ((!best.empty()) && best.top().rank == std::numeric_limits<int32_t>::max()) {
-        best.pop();
+    int left = count;
+    while (left != 0 && bestheap->rank == std::numeric_limits<int32_t>::max()) {
+        pop_heap_raw((char*)(void*)bestheap, left);
+        --left;
     }
 
-    uint32_t result = (uint32_t)best.size();
+    uint32_t result = left;
     for (int i = ((int)result) - 1; i >= 0; --i) {
-        out_points[i] = best.top();
-        best.pop();
+        out_points[i] = *bestheap;
+        pop_heap_raw((char*)(void*)bestheap, left);
+        --left;
     }
 
     return result;
