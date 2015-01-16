@@ -21,7 +21,6 @@ struct block {
     float ys[points_per_block];
     uint32_t rankid[points_per_block];
     uint32_t children[4];
-    uint32_t pad;
 };
 
 struct SearchContext {
@@ -38,15 +37,58 @@ enum quadrant : int {
     hxhy = 3
 };
 
-float median(std::vector<float>& values) {
-    std::sort(values.begin(), values.end());
+struct valueindex {
+    float value;
+    int index;
+};
 
-    auto size = values.size();
-    if (size % 2 == 1) {
-        return values[size / 2];
+
+struct distance {
+    int orderdist;
+    float valuedist;
+};
+
+
+void add_distance_from_center(std::vector<valueindex>& values, std::vector<distance>& distances) {
+
+    std::sort(values.begin(), values.end(), [](const valueindex& a, const valueindex& b) {
+        return a.value < b.value;
+    });
+
+    int count = (int)values.size();
+    int doublemid = count - 1;
+
+    float valuescale = abs(1.0f / (values.front().value - values.back().value));
+    float valuemid = (values.front().value + values.back().value) / 2;
+
+    for (int i = 0; i < count; ++i) {
+        int orderdist = abs(i * 2 - doublemid);
+        float valuedist = abs(values[i].value - valuemid) * valuescale;
+        int index = values[i].index;
+        distances[index].orderdist += orderdist;
+        distances[index].valuedist += valuedist;
     }
+}
 
-    return (values[size / 2 - 1] + values[size / 2]) / 2;
+
+int find_centermost_candidate(const std::vector<Point>& candidates) {
+    // Find centermost point in the list of candidate points.
+    auto count = candidates.size();
+    std::vector<valueindex> xsort(count);
+    std::vector<valueindex> ysort(count);
+    for (int i = 0; i < count; ++i) {
+        xsort[i] = valueindex{ candidates[i].x, i };
+        ysort[i] = valueindex{ candidates[i].y, i };
+    }
+    std::vector<distance> distances(count);
+    add_distance_from_center(xsort, distances);
+    add_distance_from_center(ysort, distances);
+
+    auto best = std::min_element(distances.begin(), distances.end(),
+        [](const distance& a, const distance& b) {
+        return a.orderdist != b.orderdist ? a.orderdist < b.orderdist : a.valuedist < b.valuedist;
+    });
+    return (int)std::distance(distances.begin(), best);
 }
 
 uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
@@ -66,29 +108,8 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
         b.xs[i] = std::numeric_limits<float>::max();
     }
 
-    // Find centermost point in the list of candidate points.
-    std::vector<float> xsort(count);
-    std::vector<float> ysort(count);
-    for (int i = 0; i < count; ++i) {
-        xsort[i] = candidates[i].x;
-        ysort[i] = candidates[i].y;
-    }
-
-    float medianx = median(xsort);
-    float mediany = median(ysort);
-
-    float bestdist = std::numeric_limits<float>::max();
-    int bestindex = -1;
-    for (int i = 0; i < count; ++i) {
-        float dist = abs(medianx - candidates[i].x) + abs(mediany - candidates[i].y);
-
-        if (dist < bestdist) {
-            bestdist = dist;
-            bestindex = i;
-        }
-    }
-
     // Move most center point to end of block.
+    int bestindex = find_centermost_candidate(candidates);
     if (bestindex != count - 1) {
         std::swap(candidates[bestindex], candidates[count - 1]);
     }
@@ -137,7 +158,7 @@ extern "C" {
 
 __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin, const Point* points_end) {
 
-    //assert((sizeof(block) % 64) == 0);
+    assert((sizeof(block) % 64) == 0);
     auto sc = new SearchContext();
 
     auto count = std::distance(points_begin, points_end);
