@@ -24,10 +24,29 @@ struct block {
 };
 
 struct SearchContext {
+    SearchContext() : remaining_buffer(1024) {
+    }
+
+    uint32_t* enlarge(int& read_point) {
+        int oldsize = (int)remaining_buffer.size();
+        int endcount = oldsize - read_point;
+        remaining_buffer.resize(oldsize * 2);
+        auto begin = remaining_buffer.begin();
+        std::copy(begin + read_point, begin + oldsize, begin + read_point + oldsize);
+        read_point += oldsize;
+        return remaining_buffer.data();
+    }
+
+    int get_mask() {
+        return (int)remaining_buffer.size() - 1;
+    }
+
     std::vector<Point> points;
     std::vector<block> blocks;
+    std::vector<uint32_t> remaining_buffer;
     block* aligned_begin;
     block* aligned_end;
+
 };
 
 enum quadrant : int {
@@ -273,8 +292,24 @@ static __forceinline void push_heap(Point* heap, int lastpos, int8_t newid, int3
     heap[lastpos].y = y;
 }
 
+static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqueue_index, int& dequeue_index, int& queuemask, uint32_t value) {
+    queue[enqueue_index] = value;
+    enqueue_index = (enqueue_index + 1) & queuemask;
+    if (enqueue_index == dequeue_index) {
+        // The initial queue should be sized so that it is unlikely this will ever be called.
+        queue = sc->enlarge(dequeue_index);
+        queuemask = sc->get_mask();
+    }
+}
+
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
+
+    int enqueue_index = 0;
+    int dequeue_index = 0;
+    uint32_t* queue = sc->remaining_buffer.data();
+    int queuemask = sc->get_mask();
+
     const block* aligned_begin = sc->aligned_begin;
     const block* aligned_end = sc->aligned_end;
 
@@ -284,17 +319,16 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
 
     Point* bestheap = (Point*)alloca(count * sizeof(Point));
 
-    // TODO: A deque size of 1000 should be sifficient for most workloads.
-    std::deque<uint32_t> remaining;
     for (int i = 0; i < count; ++i) {
         bestheap[i].rank = std::numeric_limits<int32_t>::max();
     }
  
-    remaining.push_back(0);
-    while (!remaining.empty()) {
+    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, 0);
 
-        const block& b = aligned_begin[remaining.front()];
-        remaining.pop_front();
+    while (enqueue_index != dequeue_index) {
+        const block& b = aligned_begin[queue[dequeue_index]];
+        dequeue_index = (dequeue_index + 1) & queuemask;
+
         bool seen_better = false;
         for (int i = 0; i < points_per_block; ++i) {
             float x = b.xs[i];
@@ -318,22 +352,24 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
             bool ishy = rect.hy >= y;
 
             if (islx && isly && b.children[lxly]) {
-                remaining.push_back(b.children[lxly]);
+                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly]);
             }
 
             if (islx && ishy && b.children[lxhy]) {
-                remaining.push_back(b.children[lxhy]);
+                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxhy]);
             }
 
             if (ishx && isly && b.children[hxly]) {
-                remaining.push_back(b.children[hxly]);
+                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxly]);
             }
 
             if (ishx && ishy && b.children[hxhy]) {
-                remaining.push_back(b.children[hxhy]);
+                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxhy]);
             }
         }
     }
+
+    assert(enqueue_index == dequeue_index);
 
     int left = count;
     while (left != 0 && bestheap->rank == std::numeric_limits<int32_t>::max()) {
