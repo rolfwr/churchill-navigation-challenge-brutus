@@ -9,6 +9,9 @@
 #include <queue>
 //#include "immintrin.h"
 
+#pragma intrinsic(memcpy)
+
+
 #define NDUMP 1
 
 // It's too early to nail down how many points per block we should have.
@@ -252,6 +255,11 @@ static __forceinline int32_t& getrank(char* p) {
     return *((int32_t*)(p + offsetof(Point,rank)));
 }
 
+static __forceinline void copy_point(char* dest, char* src) {
+    *((Point*)dest) = *((Point*)src);
+}
+
+
 static __forceinline void pop_heap_raw(char* heap, int count) {
     int end = (count - 1) * sizeof(Point);
 
@@ -276,18 +284,20 @@ static __forceinline void pop_heap_raw(char* heap, int count) {
             goto insert;
         }
 
-        memcpy(heap + i, heap + highc, sizeof(Point));
+        copy_point(heap + i, heap + highc);
+
+
         i = highc;
     }
 
 last:
     if (value < getrank(heap + c1)) {
-        memcpy(heap + i, heap + c1, sizeof(Point));
+        copy_point(heap + i, heap + c1);
         i = c1;
     }
 
 insert:
-    memcpy(heap + i, heap + end, sizeof(Point));
+    copy_point(heap + i, heap + end);
 }
 
 static __forceinline void push_heap(Point* heap, int lastpos, int8_t newid, int32_t newrank, float x, float y) {
