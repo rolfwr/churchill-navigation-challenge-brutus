@@ -14,12 +14,18 @@
 // It's too early to nail down how many points per block we should have.
 // Timing of some higher seems to on average be better, but also vary
 // greatly between runs.
-const int points_per_block = 4;
+
+const int vectorsets_per_block = 1;
+const int points_per_vectorset = 4;
+
+struct vectorset {
+    float xs[points_per_vectorset];
+    float ys[points_per_vectorset];
+    uint32_t rankid[points_per_vectorset];
+};
 
 struct block {
-    float xs[points_per_block];
-    float ys[points_per_block];
-    uint32_t rankid[points_per_block];
+    vectorset vectors[vectorsets_per_block];
     uint32_t children[4];
 };
 
@@ -111,7 +117,10 @@ int find_centermost_candidate(const std::vector<Point>& candidates) {
 }
 
 uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
-    auto count = std::min((int)std::distance(begin, end), points_per_block);
+
+    const int maxpoints = points_per_vectorset * vectorsets_per_block;
+
+    auto count = std::min((int)std::distance(begin, end), maxpoints);
     if (count == 0) {
         return 0;
     }
@@ -123,9 +132,6 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
 
-    for (int i = 0; i < points_per_block; ++i) {
-        b.xs[i] = std::numeric_limits<float>::max();
-    }
 
     // Move most center point to end of block.
     int bestindex = find_centermost_candidate(candidates);
@@ -133,17 +139,28 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
         std::swap(candidates[bestindex], candidates[count - 1]);
     }
 
+    // Make all point values initally inert.
+    for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+        vectorset& vs = b.vectors[vi];
+
+        for (int i = 0; i < points_per_vectorset; ++i) {
+            vs.xs[i] = std::numeric_limits<float>::max();
+        }
+    }
+ 
+    // Fill in the vector sets with available points.
     for (int i = 0; i < count; ++i) {
         Point& p = candidates[i];
-
-        b.xs[i] = p.x;
-        b.ys[i] = p.y;
-        b.rankid[i] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
+        vectorset& vs = b.vectors[i/points_per_vectorset];
+        vs.xs[i] = p.x;
+        vs.ys[i] = p.y;
+        vs.rankid[i] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
     }
 
-    if (count == points_per_block) {
-        float sepx = b.xs[points_per_block - 1];
-        float sepy = b.ys[points_per_block - 1];
+    // Partition remaining points and enblock them into children.
+    if (count == maxpoints) {
+        float sepx = candidates[count - 1].x;
+        float sepy = candidates[count - 1].y;
 
         Point* xsplit = std::stable_partition(begin, end, [=](const Point& pt) {
             return pt.x < sepx;
@@ -189,7 +206,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
 
     int bindex = enblock(*sc, &sc->points.data()[0], &sc->points.data()[count]);
     assert(bindex == 0);
-    assert(sc->blocks.size() >= (size_t)(count / points_per_block));
+    assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
     size_t blockcount = sc->blocks.size();
     sc->blocks.push_back(block{}); // alignment padding;
@@ -330,22 +347,25 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         dequeue_index = (dequeue_index + 1) & queuemask;
 
         bool seen_better = false;
-        for (int i = 0; i < points_per_block; ++i) {
-            float x = b.xs[i];
-            float y = b.ys[i];
-            int32_t rank = b.rankid[i] >> 8;
-            if (bestheap->rank > rank) {
-                seen_better = true;
-                if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, (int8_t)(b.rankid[i] & 0xFF), rank, x, y);
+        for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+            const vectorset& vs = b.vectors[vi];
+            for (int i = 0; i < points_per_vectorset; ++i) {
+                float x = vs.xs[i];
+                float y = vs.ys[i];
+                int32_t rank = vs.rankid[i] >> 8;
+                if (bestheap->rank > rank) {
+                    seen_better = true;
+                    if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
+                        pop_heap_raw((char*)(void*)bestheap, count);
+                        push_heap(bestheap, count - 1, (int8_t)(vs.rankid[i] & 0xFF), rank, x, y);
+                    }
                 }
             }
         }
 
         if (seen_better) {
-            float x = b.xs[points_per_block - 1];
-            float y = b.ys[points_per_block - 1];
+            float x = b.vectors[vectorsets_per_block - 1].xs[points_per_vectorset - 1];
+            float y = b.vectors[vectorsets_per_block - 1].ys[points_per_vectorset - 1];
             bool islx = rect.lx < x;
             bool ishx = rect.hx >= x;
             bool isly = rect.ly < y;
