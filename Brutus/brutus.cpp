@@ -18,6 +18,12 @@
 const int vectorsets_per_block = 1;
 const int points_per_vectorset = 4;
 
+struct compressed_point {
+    float x;
+    float y;
+    uint32_t rankid;
+};
+
 struct vectorset {
     float xs[points_per_vectorset];
     float ys[points_per_vectorset];
@@ -248,20 +254,20 @@ int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t 
     return result;
 };
 
-static __forceinline int32_t& getrank(char* p) {
-    return *((int32_t*)(p + offsetof(Point,rank)));
+static __forceinline uint32_t& getrankid(char* p) {
+    return *((uint32_t*)(p + offsetof(compressed_point,rankid)));
 }
 
 static __forceinline void pop_heap_raw(char* heap, int count) {
-    int end = (count - 1) * sizeof(Point);
+    int end = (count - 1) * sizeof(compressed_point);
 
-    int32_t value = getrank(heap + end);
+    uint32_t value = getrankid(heap + end);
     // Find insert point.
     int i = 0;
     int c1;
     while (true) {
-        c1 = i * 2 + sizeof(Point) * 1;
-        int c2 = i * 2 + sizeof(Point) * 2;
+        c1 = i * 2 + sizeof(compressed_point) * 1;
+        int c2 = i * 2 + sizeof(compressed_point) * 2;
         if (c1 >= end) {
             goto insert;
         }
@@ -270,31 +276,31 @@ static __forceinline void pop_heap_raw(char* heap, int count) {
             goto last;
         }
 
-        int highc = (getrank(heap + c2) > getrank(heap + c1)) ? c2 : c1;
+        int highc = (getrankid(heap + c2) > getrankid(heap + c1)) ? c2 : c1;
 
-        if (value >= getrank(heap + highc)) {
+        if (value >= getrankid(heap + highc)) {
             goto insert;
         }
 
-        memcpy(heap + i, heap + highc, sizeof(Point));
+        memcpy(heap + i, heap + highc, sizeof(compressed_point));
         i = highc;
     }
 
 last:
-    if (value < getrank(heap + c1)) {
-        memcpy(heap + i, heap + c1, sizeof(Point));
+    if (value < getrankid(heap + c1)) {
+        memcpy(heap + i, heap + c1, sizeof(compressed_point));
         i = c1;
     }
 
 insert:
-    memcpy(heap + i, heap + end, sizeof(Point));
+    memcpy(heap + i, heap + end, sizeof(compressed_point));
 }
 
-static __forceinline void push_heap(Point* heap, int lastpos, int8_t newid, int32_t newrank, float x, float y) {
+static __forceinline void push_heap(compressed_point* heap, int lastpos, uint32_t newrankid, float x, float y) {
     assert(lastpos != 0);
     do {
         int parent = (lastpos - 1) / 2;
-        if (heap[parent].rank >= newrank) {
+        if (heap[parent].rankid >= newrankid) {
             break;
         }
 
@@ -303,10 +309,9 @@ static __forceinline void push_heap(Point* heap, int lastpos, int8_t newid, int3
     } while (lastpos != 0);
 
     
-    heap[lastpos].id = newid;
-    heap[lastpos].rank = newrank;
     heap[lastpos].x = x;
     heap[lastpos].y = y;
+    heap[lastpos].rankid = newrankid;
 }
 
 static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqueue_index, int& dequeue_index, int& queuemask, uint32_t value) {
@@ -334,10 +339,10 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         return 0;
     }
 
-    Point* bestheap = (Point*)alloca(count * sizeof(Point));
+    compressed_point* bestheap = (compressed_point*)alloca(count * sizeof(compressed_point));
 
     for (int i = 0; i < count; ++i) {
-        bestheap[i].rank = std::numeric_limits<int32_t>::max();
+        bestheap[i].rankid = std::numeric_limits<int32_t>::max();
     }
  
     enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, 0);
@@ -352,12 +357,12 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
             for (int i = 0; i < points_per_vectorset; ++i) {
                 float x = vs.xs[i];
                 float y = vs.ys[i];
-                int32_t rank = vs.rankid[i] >> 8;
-                if (bestheap->rank > rank) {
+                uint32_t rankid = vs.rankid[i];
+                if (bestheap->rankid > rankid) {
                     seen_better = true;
                     if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
                         pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, (int8_t)(vs.rankid[i] & 0xFF), rank, x, y);
+                        push_heap(bestheap, count - 1, vs.rankid[i], x, y);
                     }
                 }
             }
@@ -392,14 +397,17 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
     assert(enqueue_index == dequeue_index);
 
     int left = count;
-    while (left != 0 && bestheap->rank == std::numeric_limits<int32_t>::max()) {
+    while (left != 0 && bestheap->rankid == std::numeric_limits<int32_t>::max()) {
         pop_heap_raw((char*)(void*)bestheap, left);
         --left;
     }
 
     uint32_t result = left;
     for (int i = ((int)result) - 1; i >= 0; --i) {
-        out_points[i] = *bestheap;
+        out_points[i].id = bestheap->rankid;
+        out_points[i].rank = bestheap->rankid >> 8;
+        out_points[i].x = bestheap->x;
+        out_points[i].y = bestheap->y;
         pop_heap_raw((char*)(void*)bestheap, left);
         --left;
     }
