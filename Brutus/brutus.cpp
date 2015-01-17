@@ -336,6 +336,11 @@ static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqu
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
 
+    __m128 lxs = _mm_load1_ps(&rect.lx);
+    __m128 hxs = _mm_load1_ps(&rect.hx);
+    __m128 lys = _mm_load1_ps(&rect.ly);
+    __m128 hys = _mm_load1_ps(&rect.hy);
+
     int enqueue_index = 0;
     int dequeue_index = 0;
     uint32_t* queue = sc->remaining_buffer.data();
@@ -362,31 +367,27 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
 
         bool seen_better = false;
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+            uint32_t ranklimit = bestheap->rankid >> 8;
+            __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
             const vectorset& vs = b.vectors[vi];
+            __m128i rankids = _mm_load_si128((const __m128i*)&vs.rankid[0]);
+            __m128i ranks = _mm_srli_epi32(rankids, 8);
+            __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
 
-            bool lxc[4];
-            bool hxc[4];
-            bool lyc[4];
-            bool hyc[4];
-            bool inbound[4];
-            bool better[4];
+            __m128 xs = _mm_load_ps(&vs.xs[0]);
+            __m128 ys = _mm_load_ps(&vs.ys[0]);
+            __m128 lxcv = _mm_cmple_ps(lxs, xs);
+            __m128 hxcv = _mm_cmple_ps(xs, hxs);
+            __m128 lycv = _mm_cmple_ps(lys, ys);
+            __m128 hycv = _mm_cmple_ps(ys, hys);
+            __m128 inbounds = _mm_and_ps(_mm_and_ps(lxcv, hxcv), _mm_and_ps(lycv, hycv));
+            __m128i inboundsi = _mm_castps_si128(inbounds);
+            __m128i dopush = _mm_and_si128(inboundsi, betterv);
 
             for (int i = 0; i < points_per_vectorset; ++i) {
-                float x = vs.xs[i];
-                float y = vs.ys[i];
-
-                lxc[i] = x >= rect.lx;
-                hxc[i] = x <= rect.hx;
-                lyc[i] = y >= rect.ly;
-                hyc[i] = y <= rect.hy;
-                inbound[i] = lxc[i] && hxc[i] && lyc[i] && hyc[i];
-                better[i] = bestheap->rankid > vs.rankid[i];
-
-            }
-            for (int i = 0; i < points_per_vectorset; ++i) {
-                if (better[i]) {
+                if (betterv.m128i_i32[i]) {
                     seen_better = true;
-                    if (inbound[i] && bestheap->rankid > vs.rankid[i]) {
+                    if ((inboundsi.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
                         pop_heap_raw((char*)(void*)bestheap, count);
                         push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
                     }
