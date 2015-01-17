@@ -7,7 +7,7 @@
 #include <cmath>
 #include <stack>
 #include <queue>
-//#include "immintrin.h"
+#include "immintrin.h"
 
 #pragma intrinsic(memcpy)
 
@@ -335,6 +335,11 @@ static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqu
 
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
+    __m128 lxs = _mm_load1_ps(&rect.lx);
+    __m128 hxs = _mm_load1_ps(&rect.hx);
+    __m128 lys = _mm_load1_ps(&rect.ly);
+    __m128 hys = _mm_load1_ps(&rect.hy);
+
 
     int enqueue_index = 0;
     int dequeue_index = 0;
@@ -360,19 +365,52 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         const block& b = aligned_begin[queue[dequeue_index]];
         dequeue_index = (dequeue_index + 1) & queuemask;
 
-        bool seen_better = false;
+        int seen_better = 0;
+
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+            __m128i ranklimit = _mm_set_epi32(bestheap->rankid, bestheap->rankid, bestheap->rankid, bestheap->rankid);
             const vectorset& vs = b.vectors[vi];
+            //for (int i = 0; i < points_per_vectorset; ++i) {
+            //    better[i] = bestheap->rankid > vs.rankid[i];
+
+            __m128i rankids = _mm_load_si128((const __m128i*)&vs.rankid[0]);
+            __m128i better = _mm_cmpgt_epi32(ranklimit, rankids);
+
+            //    float x = vs.xs[i];
+            __m128 xs = _mm_load_ps(&vs.xs[0]);
+
+            // float y = vs.ys[i];
+            __m128 ys = _mm_load_ps(&vs.ys[0]);
+
+            //    lxc[i] = x >= rect.lx;
+            //    lxc[i] = rect.lx <= x;
+            __m128 lxc = _mm_cmple_ps(lxs, xs);
+
+            //    hxc[i] = x <= rect.hx;
+            __m128 hxc = _mm_cmple_ps(xs, hxs);
+
+            //    lyc[i] = y >= rect.ly;
+            //    lyc[i] = rect.ly <= y;
+            __m128 lyc = _mm_cmple_ps(lys, ys);
+
+            //    hyc[i] = y <= rect.hy;
+            __m128 hyc = _mm_cmple_ps(ys, hys);
+
+            //dopush[i] = better[i] && lxc[i] && hxc[i] && lyc[i] && hyc[i];
+            __m128 inbounds = _mm_and_ps(_mm_and_ps(lxc, hxc), _mm_and_ps(lyc, hyc));
+            __m128i inboundsi = _mm_castps_si128(inbounds);
+            __m128i dopush = _mm_and_si128(inboundsi, better);
+
+
+            //}
+
+
+
             for (int i = 0; i < points_per_vectorset; ++i) {
-                float x = vs.xs[i];
-                float y = vs.ys[i];
-                uint32_t rankid = vs.rankid[i];
-                if (bestheap->rankid > rankid) {
-                    seen_better = true;
-                    if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, rankid, x, y);
-                    }
+                seen_better |= better.m128i_i32[i];
+                if (dopush.m128i_i32[i] && vs.rankid[i] < bestheap->rankid) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
                 }
             }
         }
