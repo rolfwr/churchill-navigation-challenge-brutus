@@ -7,7 +7,7 @@
 #include <cmath>
 #include <stack>
 #include <queue>
-//#include "immintrin.h"
+#include "immintrin.h"
 
 #pragma intrinsic(memcpy)
 
@@ -363,15 +363,32 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         bool seen_better = false;
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
             const vectorset& vs = b.vectors[vi];
+
+            bool lxc[4];
+            bool hxc[4];
+            bool lyc[4];
+            bool hyc[4];
+            bool inbound[4];
+            bool better[4];
+
             for (int i = 0; i < points_per_vectorset; ++i) {
                 float x = vs.xs[i];
                 float y = vs.ys[i];
-                uint32_t rankid = vs.rankid[i];
-                if (bestheap->rankid > rankid) {
+
+                lxc[i] = x >= rect.lx;
+                hxc[i] = x <= rect.hx;
+                lyc[i] = y >= rect.ly;
+                hyc[i] = y <= rect.hy;
+                inbound[i] = lxc[i] && hxc[i] && lyc[i] && hyc[i];
+                better[i] = bestheap->rankid > vs.rankid[i];
+
+            }
+            for (int i = 0; i < points_per_vectorset; ++i) {
+                if (better[i]) {
                     seen_better = true;
-                    if (x >= rect.lx && x <= rect.hx && y >= rect.ly && y <= rect.hy) {
+                    if (inbound[i] && bestheap->rankid > vs.rankid[i]) {
                         pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, rankid, x, y);
+                        push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
                     }
                 }
             }
