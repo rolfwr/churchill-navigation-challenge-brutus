@@ -11,7 +11,6 @@
 
 #pragma intrinsic(memcpy)
 
-
 #define NDUMP 1
 
 // It's too early to nail down how many points per block we should have.
@@ -364,6 +363,9 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
     while (enqueue_index != dequeue_index) {
         const block& b = aligned_begin[queue[dequeue_index]];
         dequeue_index = (dequeue_index + 1) & queuemask;
+        if (enqueue_index != dequeue_index) {
+            _mm_prefetch((const char*)(&aligned_begin[queue[dequeue_index]]), _MM_HINT_T0);
+        }
 
         bool seen_better = false;
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
