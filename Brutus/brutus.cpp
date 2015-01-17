@@ -367,37 +367,33 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
             _mm_prefetch((const char*)(&aligned_begin[queue[dequeue_index]]), _MM_HINT_T0);
         }
 
-        bool seen_better = false;
+        __m128i seen_better = _mm_setzero_si128();
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
             uint32_t ranklimit = bestheap->rankid >> 8;
             __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
             const vectorset& vs = b.vectors[vi];
-            __m128i rankids = _mm_load_si128((const __m128i*)&vs.rankid[0]);
-            __m128i ranks = _mm_srli_epi32(rankids, 8);
+            __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
             __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
-
+            seen_better = _mm_or_si128(seen_better, betterv);
             __m128 xs = _mm_load_ps(&vs.xs[0]);
             __m128 ys = _mm_load_ps(&vs.ys[0]);
-            __m128 lxcv = _mm_cmple_ps(lxs, xs);
-            __m128 hxcv = _mm_cmple_ps(xs, hxs);
-            __m128 lycv = _mm_cmple_ps(lys, ys);
-            __m128 hycv = _mm_cmple_ps(ys, hys);
-            __m128 inbounds = _mm_and_ps(_mm_and_ps(lxcv, hxcv), _mm_and_ps(lycv, hycv));
-            __m128i inboundsi = _mm_castps_si128(inbounds);
+
+            __m128i inboundsi = _mm_castps_si128(
+                _mm_and_ps(
+                    _mm_and_ps(_mm_cmple_ps(lxs, xs), _mm_cmple_ps(xs, hxs)),
+                    _mm_and_ps(_mm_cmple_ps(lys, ys), _mm_cmple_ps(ys, hys))));
+
             __m128i dopush = _mm_and_si128(inboundsi, betterv);
 
             for (int i = 0; i < points_per_vectorset; ++i) {
-                if (betterv.m128i_i32[i]) {
-                    seen_better = true;
-                    if ((inboundsi.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
-                    }
+                if ((dopush.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
                 }
             }
         }
 
-        if (seen_better) {
+        if (!(_mm_test_all_zeros(seen_better, seen_better))) {
             float x = b.vectors[vectorsets_per_block - 1].xs[points_per_vectorset - 1];
             float y = b.vectors[vectorsets_per_block - 1].ys[points_per_vectorset - 1];
             bool islx = rect.lx < x;
