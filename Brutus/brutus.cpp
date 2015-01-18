@@ -7,6 +7,10 @@
 #include <cmath>
 #include <stack>
 #include <queue>
+#include <atomic>
+
+#define NOMINMAX
+#include "windows.h"
 #include "immintrin.h"
 
 #pragma intrinsic(memcpy)
@@ -19,6 +23,7 @@
 
 const int vectorsets_per_block = 1;
 const int points_per_vectorset = 4;
+const int workers = 3;
 
 struct vectorset {
     float xs[points_per_vectorset];
@@ -31,8 +36,23 @@ struct block {
     uint32_t children[4];
 };
 
+struct compressed_point {
+    uint32_t rankid;
+    float x;
+    float y;
+};
+
+struct compressed_atomic_point {
+    uint32_t rankid;
+    float x;
+    float y;
+    std::atomic<bool> ready;
+};
+
+
 struct SearchContext {
     SearchContext() : remaining_buffer(1024) {
+        memset(&found[0], 0, sizeof(compressed_atomic_point) * 100000);
     }
 
     uint32_t* enlarge(int& read_point) {
@@ -50,11 +70,16 @@ struct SearchContext {
     }
 
     std::vector<Point> points;
-    std::vector<block> blocks;
+    std::vector<block> blocks[workers];
     std::vector<uint32_t> remaining_buffer;
-    block* aligned_begin;
-    block* aligned_end;
+    block* aligned_begin[workers];
+    block* aligned_end[workers];
+    Rect rect;
+    std::atomic<compressed_atomic_point*> filled;
+    std::atomic<uint32_t> ranklimit;
+    std::atomic<int> running;
 
+    compressed_atomic_point found[100000];
 };
 
 enum quadrant : int {
@@ -118,7 +143,7 @@ int find_centermost_candidate(const std::vector<Point>& candidates) {
     return (int)std::distance(distances.begin(), best);
 }
 
-uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
+uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end) {
 
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
 
@@ -127,9 +152,9 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
         return 0;
     }
 
-    uint32_t result = (uint32_t)sc.blocks.size();
-    sc.blocks.push_back(block{});
-    block& b = sc.blocks.back();
+    uint32_t result = (uint32_t)blocks.size();
+    blocks.push_back(block{});
+    block& b = blocks.back();
 
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
@@ -176,12 +201,12 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
             return pt.y < sepy;
         });
 
-        uint32_t lxly = enblock(sc, begin, ysplit1);
-        uint32_t lxhy = enblock(sc, ysplit1, xsplit);
-        uint32_t hxly = enblock(sc, xsplit, ysplit2);
-        uint32_t hxhy = enblock(sc, ysplit2, end);
+        uint32_t lxly = enblock(blocks, begin, ysplit1);
+        uint32_t lxhy = enblock(blocks, ysplit1, xsplit);
+        uint32_t hxly = enblock(blocks, xsplit, ysplit2);
+        uint32_t hxhy = enblock(blocks, ysplit2, end);
         
-        block& parent = sc.blocks[result];
+        block& parent = blocks[result];
         parent.children[quadrant::lxly] = lxly;
         parent.children[quadrant::lxhy] = lxhy;
         parent.children[quadrant::hxly] = hxly;
@@ -202,23 +227,38 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     auto count = std::distance(points_begin, points_end);
     sc->points.resize(count);
     std::copy(points_begin, points_end, sc->points.begin());
-    std::sort(sc->points.begin(), sc->points.end(), [](const Point& a, const Point& b) {
-        return a.rank < b.rank;
-    });
 
-    int bindex = enblock(*sc, &sc->points.data()[0], &sc->points.data()[count]);
-    assert(bindex == 0);
-    assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
+    auto shardcount = count / workers;
 
-    size_t blockcount = sc->blocks.size();
-    sc->blocks.push_back(block{}); // alignment padding;
+    Point* shard_begin = &sc->points.data()[0];
+    for (int shard = 0; shard < workers; ++shard) {
+        Point* shard_end = shard_begin + shardcount;
+        if (shard + 1 == workers) {
+            shard_end = &sc->points.data()[count];
+        }
 
-    size_t begin = (size_t)(&sc->blocks.data()[0]);
-    size_t aligned = (begin + 63) & ~((size_t)63);
 
-    std::memmove((void*)aligned, (void*)begin, blockcount * sizeof(block));
-    sc->aligned_begin = (block*) aligned;
-    sc->aligned_end = sc->aligned_begin + blockcount;
+        std::sort(shard_begin, shard_end, [](const Point& a, const Point& b) {
+            return a.rank < b.rank;
+        });
+
+        int bindex = enblock(sc->blocks[shard], shard_begin, shard_end);
+        assert(bindex == 0);
+        assert(sc->blocks[shard].size() >= (size_t)(shardcount / (points_per_vectorset*vectorsets_per_block)));
+
+        size_t blockcount = sc->blocks[shard].size();
+        sc->blocks[shard].push_back(block{}); // alignment padding;
+
+        size_t begin = (size_t)(&sc->blocks[shard].data()[0]);
+        size_t aligned = (begin + 63) & ~((size_t)63);
+
+        std::memmove((void*)aligned, (void*)begin, blockcount * sizeof(block));
+        sc->aligned_begin[shard] = (block*)aligned;
+        sc->aligned_end[shard] = sc->aligned_begin[shard] + blockcount;
+
+        shard_begin = shard_end;
+    }
+
 
 #ifdef NDEBUG
     sc->points.clear();
@@ -248,12 +288,6 @@ int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t 
     auto result = (int32_t)std::distance(out_points, outptr);
 
     return result;
-};
-
-struct compressed_point {
-    uint32_t rankid;
-    float x;
-    float y;
 };
 
 static __forceinline uint32_t& getrankid(char* p) {
@@ -332,32 +366,33 @@ static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqu
     }
 }
 
-int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
-{
+struct work {
+    SearchContext* sc;
+    int id;
+};
 
-    __m128 lxs = _mm_load1_ps(&rect.lx);
-    __m128 hxs = _mm_load1_ps(&rect.hx);
-    __m128 lys = _mm_load1_ps(&rect.ly);
-    __m128 hys = _mm_load1_ps(&rect.hy);
+
+DWORD WINAPI scan_worker(LPVOID workptr) {
+    work* w = (work*)workptr;
+    SearchContext* sc = w->sc;
+
+    __m128 lxs = _mm_load1_ps(&sc->rect.lx);
+    __m128 hxs = _mm_load1_ps(&sc->rect.hx);
+    __m128 lys = _mm_load1_ps(&sc->rect.ly);
+    __m128 hys = _mm_load1_ps(&sc->rect.hy);
 
     int enqueue_index = 0;
     int dequeue_index = 0;
     uint32_t* queue = sc->remaining_buffer.data();
     int queuemask = sc->get_mask();
 
-    const block* aligned_begin = sc->aligned_begin;
-    const block* aligned_end = sc->aligned_end;
+    const block* aligned_begin = sc->aligned_begin[w->id];
+    const block* aligned_end = sc->aligned_end[w->id];
 
     if (aligned_begin == aligned_end) {
-        return 0;
+        goto done;
     }
 
-    compressed_point* bestheap = (compressed_point*)alloca(count * sizeof(compressed_point));
-
-    for (int i = 0; i < count; ++i) {
-        bestheap[i].rankid = std::numeric_limits<uint32_t>::max();
-    }
- 
     enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, 0);
 
     while (enqueue_index != dequeue_index) {
@@ -369,7 +404,7 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
 
         __m128i seen_better = _mm_setzero_si128();
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
-            uint32_t ranklimit = bestheap->rankid >> 8;
+            uint32_t ranklimit = sc->ranklimit.load() >> 8;
             __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
             const vectorset& vs = b.vectors[vi];
             __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
@@ -383,12 +418,13 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
                     _mm_and_ps(_mm_cmple_ps(lxs, xs), _mm_cmple_ps(xs, hxs)),
                     _mm_and_ps(_mm_cmple_ps(lys, ys), _mm_cmple_ps(ys, hys))));
 
-            __m128i dopush = _mm_and_si128(inboundsi, betterv);
-
             for (int i = 0; i < points_per_vectorset; ++i) {
-                if ((dopush.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
+                if (inboundsi.m128i_i32[i]) {
+                    compressed_atomic_point* writepoint = sc->filled.fetch_add(1);
+                    writepoint->rankid = vs.rankid[i];
+                    writepoint->x = vs.xs[i];
+                    writepoint->y = vs.ys[i];
+                    writepoint->ready.store(true);
                 }
             }
         }
@@ -396,10 +432,10 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         if (!(_mm_test_all_zeros(seen_better, seen_better))) {
             float x = b.vectors[vectorsets_per_block - 1].xs[points_per_vectorset - 1];
             float y = b.vectors[vectorsets_per_block - 1].ys[points_per_vectorset - 1];
-            bool islx = rect.lx < x;
-            bool ishx = rect.hx >= x;
-            bool isly = rect.ly < y;
-            bool ishy = rect.hy >= y;
+            bool islx = sc->rect.lx < x;
+            bool ishx = sc->rect.hx >= x;
+            bool isly = sc->rect.ly < y;
+            bool ishy = sc->rect.hy >= y;
 
             if (islx && isly && b.children[lxly]) {
                 enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly]);
@@ -419,7 +455,54 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         }
     }
 
-    assert(enqueue_index == dequeue_index);
+    done:
+    sc->running.fetch_sub(1);
+    return 0;
+};
+
+
+
+int32_t search_master(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+    sc->running.store(workers);
+    sc->rect = rect;
+    sc->filled.store(&sc->found[0]);
+    sc->ranklimit = std::numeric_limits<uint32_t>::max();
+    work ws[workers];
+    compressed_atomic_point* pos = &sc->found[0];
+    for (int shard = 0; shard < workers; ++shard){
+        work* w = &ws[shard];
+        w->id = shard;
+        w->sc = sc;
+        QueueUserWorkItem(&scan_worker, w, 0);
+    }
+
+    
+    compressed_point* bestheap = (compressed_point*)alloca(count * sizeof(compressed_point));
+    for (int i = 0; i < count; ++i) {
+        bestheap[i].rankid = std::numeric_limits<uint32_t>::max();
+    }
+    int running;
+    do {
+        running = sc->running.load();
+        while (pos != sc->filled.load()) {
+            assert(pos < sc->filled.load());
+            if (!pos->ready.load()) {
+                continue;
+            }
+
+            pos->ready.store(false);
+
+            if (pos->rankid < bestheap->rankid) {
+                pop_heap_raw((char*)(void*)bestheap, count);
+                push_heap(bestheap, count - 1, pos->rankid, pos->x, pos->y);
+                sc->ranklimit.store(bestheap->rankid);
+            }
+            ++pos;
+        }
+
+    } while (running);
+
+    assert(pos == sc->filled.load());
 
     int left = count;
     while (left != 0 && bestheap->rankid == std::numeric_limits<uint32_t>::max()) {
@@ -438,15 +521,14 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
     }
 
     return result;
-};
-
+}
 
 __declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
 #ifndef NDEBUG 
     std::vector<Point> goodbuf(count);
     auto goodresult = search_good(sc, rect, count, &goodbuf.front());
 #endif
-    auto result = search_alt(sc, rect, count, out_points);
+    auto result = search_master(sc, rect, count, out_points);
 
 #ifndef NDEBUG 
     assert(result == goodresult);
