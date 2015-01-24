@@ -256,6 +256,11 @@ struct compressed_point {
     float y;
 };
 
+struct coord {
+    float x;
+    float y;
+};
+
 static __forceinline uint32_t& getrankid(char* p) {
     return *((uint32_t*)(p + offsetof(compressed_point, rankid)));
 }
@@ -332,6 +337,28 @@ static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqu
     }
 }
 
+static __forceinline int replace_high(uint32_t* bestrankid, coord* bestcoord, const int32_t count, uint32_t newrankid, float newx, float newy, int oldhighindex) {
+    bestrankid[oldhighindex] = newrankid;
+    bestcoord[oldhighindex].x = newx;
+    bestcoord[oldhighindex].y = newy;
+    int result = 0;
+    uint32_t high = bestrankid[0];
+    for (int i = 1; i < count; ++i) {
+        if (high == std::numeric_limits<uint32_t>::max()) {
+            break;
+        }
+
+        uint32_t other = bestrankid[i];
+        if (other > high) {
+            high = other;
+            result = i;
+        }
+    }
+
+    return result;
+}
+
+
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
 
@@ -352,11 +379,17 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         return 0;
     }
 
-    compressed_point* bestheap = (compressed_point*)alloca(count * sizeof(compressed_point));
+    uint32_t* bestrankid = (uint32_t*)alloca(count * sizeof(uint32_t));
+    coord* bestcoord = (coord*)alloca(count * sizeof(coord));
 
     for (int i = 0; i < count; ++i) {
-        bestheap[i].rankid = std::numeric_limits<uint32_t>::max();
+        bestrankid[i] = std::numeric_limits<uint32_t>::max();
     }
+
+    int highindex = 0;
+    uint32_t highrankid = std::numeric_limits<uint32_t>::max();
+    uint32_t highranklimit = highrankid >> 8;
+    __m128i ranklimitv = _mm_set_epi32(highranklimit, highranklimit, highranklimit, highranklimit);
  
     enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, 0);
 
@@ -369,8 +402,7 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
 
         __m128i seen_better = _mm_setzero_si128();
         for (int vi = 0; vi < vectorsets_per_block; ++vi) {
-            uint32_t ranklimit = bestheap->rankid >> 8;
-            __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
+            // TODO: remember recalc of ranklimitv
             const vectorset& vs = b.vectors[vi];
             __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
             __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
@@ -386,9 +418,11 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
             __m128i dopush = _mm_and_si128(inboundsi, betterv);
 
             for (int i = 0; i < points_per_vectorset; ++i) {
-                if ((dopush.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
+                if ((dopush.m128i_i32[i] != 0) && highrankid > vs.rankid[i]) {
+                    highindex = replace_high(bestrankid, bestcoord, count, vs.rankid[i], vs.xs[i], vs.ys[i], highindex);
+                    highrankid = bestrankid[highindex];
+                    highranklimit = highrankid >> 8;
+                    ranklimitv = _mm_set_epi32(highranklimit, highranklimit, highranklimit, highranklimit);
                 }
             }
         }
@@ -421,23 +455,33 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
 
     assert(enqueue_index == dequeue_index);
 
-    int left = count;
-    while (left != 0 && bestheap->rankid == std::numeric_limits<uint32_t>::max()) {
-        pop_heap_raw((char*)(void*)bestheap, left);
-        --left;
+    std::vector<uint16_t> indicies;
+    indicies.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        indicies.push_back(i);
     }
 
-    uint32_t result = left;
-    for (int i = ((int)result) - 1; i >= 0; --i) {
-        out_points[i].id = (int8_t)(bestheap->rankid);
-        out_points[i].rank = bestheap->rankid >> 8;
-        out_points[i].x = bestheap->x;
-        out_points[i].y = bestheap->y;
-        pop_heap_raw((char*)(void*)bestheap, left);
-        --left;
+    std::sort(indicies.begin(), indicies.end(), [&](int a, int b) {
+        return bestrankid[a] < bestrankid[b];
+    });
+
+    int i = 0;
+    while (i < count) {
+        int j = indicies[i];
+        uint32_t rankid = bestrankid[j];
+        if (rankid == std::numeric_limits<uint32_t>::max())
+        {
+            break;
+        }
+
+        out_points[i].id = (int8_t)rankid;
+        out_points[i].rank = rankid >> 8;
+        out_points[i].x = bestcoord[j].x;
+        out_points[i].y = bestcoord[j].y;
+        ++i;
     }
 
-    return result;
+    return i;
 };
 
 
@@ -450,6 +494,16 @@ __declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rec
 
 #ifndef NDEBUG 
     assert(result == goodresult);
+
+    for (int i = 0; i < result; ++i) {
+        auto goodpoint = goodbuf[i];
+        auto point = out_points[i];
+        assert(goodpoint.id == point.id);
+        assert(goodpoint.rank == point.rank);
+        assert(goodpoint.x == point.x);
+        assert(goodpoint.y == point.y);
+    }
+
     assert(memcmp(goodbuf.data(), out_points, result * sizeof(Point)) == 0);
 #endif
     return result;
