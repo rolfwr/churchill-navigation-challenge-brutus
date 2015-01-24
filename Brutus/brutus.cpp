@@ -459,16 +459,41 @@ static __forceinline void push_heap(compressed_point* heap, int lastpos, uint32_
     heap[lastpos].y = y;
 }
 
-/** Add index of block to process later to the ring buffer. */
-static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqueue_index, int& dequeue_index, int& queuemask, uint32_t value) {
-    queue[enqueue_index] = value;
-    enqueue_index = (enqueue_index + 1) & queuemask;
-    if (enqueue_index == dequeue_index) {
-        // The initial queue should be sized so that it is unlikely this will ever be called.
-        queue = sc->enlarge(dequeue_index);
-        queuemask = sc->get_mask();
+struct ring_buffer {
+    int dequeue_index;
+    int enqueue_index;
+
+    uint32_t* buffer;
+    int mask;
+
+    ring_buffer(uint32_t* buffer_, int mask_)
+        : dequeue_index(0), enqueue_index(0), buffer(buffer_), mask(mask_)
+    {
     }
-}
+
+    /** Add index of block to process later to the ring buffer. */
+    __forceinline void enqueue(SearchContext* sc, uint32_t value) {
+        buffer[enqueue_index] = value;
+        enqueue_index = (enqueue_index + 1) & mask;
+        if (enqueue_index == dequeue_index) {
+            // The initial queue should be sized so that it is unlikely this will ever be called.
+            buffer = sc->enlarge(dequeue_index);
+            mask = sc->get_mask();
+        }
+    }
+
+    __forceinline bool contains_values() {
+        return dequeue_index != enqueue_index;
+    }
+
+    __forceinline uint32_t front() {
+        return buffer[dequeue_index];
+    }
+
+    __forceinline void pop() {
+        dequeue_index = (dequeue_index + 1) & mask;
+    }
+};
 
 extern "C" {
 
@@ -482,13 +507,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     __m128 lys = _mm_load1_ps(&rect.ly);
     __m128 hys = _mm_load1_ps(&rect.hy);
 
-    // Read and write indiceies into the ring buffer used to queue up blocks
-    // for processing.
-    int dequeue_index = 0;
-    int enqueue_index = 0;
-
-    uint32_t* queue = sc->remaining_buffer.data();
-    int queuemask = sc->get_mask();
+    ring_buffer queue(sc->remaining_buffer.data(), sc->get_mask());
 
     const block* aligned_begin = sc->aligned_begin;
     if (aligned_begin == nullptr) {
@@ -506,19 +525,20 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
  
     // Start on the root block. All other blocks to be searched will be found
     // from there.
-    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, 0);
+    queue.enqueue(sc, 0);
 
     // Loop until no more blocks remain in queue.
-    while (enqueue_index != dequeue_index) {
-        const block& b = aligned_begin[queue[dequeue_index]];
-        dequeue_index = (dequeue_index + 1) & queuemask;
+    while (queue.contains_values()) {
+        const block& b = aligned_begin[queue.front()];
+        queue.pop();
 
-        if (enqueue_index != dequeue_index) {
+        if (queue.contains_values()) {
             // Try to prefetch the memory region for the next block to be
             // proccessed into the CPU cache. We do this before starting to
             // process the current block, so that the fetch occur concurrently.
-            _mm_prefetch((const char*)(&aligned_begin[queue[dequeue_index]]), _MM_HINT_T0);
-            _mm_prefetch(((const char*)(&aligned_begin[queue[dequeue_index]]) + 64), _MM_HINT_T0);
+            const char* memloc = (const char*)(&aligned_begin[queue.front()]);
+            _mm_prefetch(memloc, _MM_HINT_T0);
+            _mm_prefetch(memloc + 64, _MM_HINT_T0);
         }
 
         // If we don't see any rank values that are lower than the rank
@@ -574,24 +594,24 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             // bounds.
 
             if (islx && isly && b.children[lxly]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly]);
+                queue.enqueue(sc, b.children[lxly]);
             }
 
             if (islx && ishy && b.children[lxhy]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxhy]);
+                queue.enqueue(sc, b.children[lxhy]);
             }
 
             if (ishx && isly && b.children[hxly]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxly]);
+                queue.enqueue(sc, b.children[hxly]);
             }
 
             if (ishx && ishy && b.children[hxhy]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxhy]);
+                queue.enqueue(sc, b.children[hxhy]);
             }
         }
     }
 
-    assert(enqueue_index == dequeue_index);
+    assert(!queue.contains_values());
 
     int left = count;
 
@@ -651,7 +671,7 @@ __declspec(dllexport) int32_t __stdcall search_good(SearchContext* sc, const Rec
 
 /** Debug build search API entry-point.
  */
-__declspec(dllexport) int32_t __stdcall search_debug(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+__declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
     std::vector<Point> goodbuf(count);
     auto goodresult = search_good(sc, rect, count, &goodbuf.front());
     auto result = search_fast(sc, rect, count, out_points);
