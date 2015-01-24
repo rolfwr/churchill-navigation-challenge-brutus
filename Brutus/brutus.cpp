@@ -132,8 +132,6 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
     int available = (int)std::distance(begin, end);
     int count;
-    // TODO: Tune
-    bool balance = (available > maxpoints * 3) && (depth < 8);
     if (available > maxpoints) {
             count = maxpoints;
     }
@@ -154,14 +152,10 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
 
-    float sepx;
-    float sepy;
+    float sepx = 0;
+    float sepy = 0;
 
-    // Move most center point to end of block.
-    int bestindex = find_centermost_candidate(candidates);
-    sepx = candidates[bestindex].x;
-    sepy = candidates[bestindex].y;
-    if (balance) {
+    if (remaining) {
         std::vector<float> xrem;
         xrem.reserve(remaining);
         for (int i = 0; i < remaining; ++i) {
@@ -200,10 +194,10 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
         {
             sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
         }
-    }
 
-    b.sepx = sepx;
-    b.sepy = sepy;
+        b.sepx = sepx;
+        b.sepy = sepy;
+    }
 
     // Make all point values initally inert.
     for (int vi = 0; vi < vectorsets_per_block; ++vi) {
