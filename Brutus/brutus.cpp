@@ -1,3 +1,25 @@
+/*
+    Copyright (c) 2015 Rolf W. Rasmussen <rolfwr@gmail.com>
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+*/
+
 #include "../../challenge/point_search.h"
 #include <vector>
 #include <algorithm>
@@ -7,12 +29,17 @@
 #include "immintrin.h"
 
 #pragma intrinsic(memcpy)
+
+#ifdef NDEBUG
+#define search_fast search
+#endif
+
 /*
  * The basic strategy for this code is to construct a tree of blocks
  * containing point data. The rank values of the points in each each block are
- * smaller than the rank values of any of the decendant blocks. Each block has
- * four child blocks, representing the four quadrants of the coordinate space
- * as divided by a pivot point also stored in the parent block.
+ * smaller than the rank values of any decendant blocks. Each block has four
+ * child blocks, representing the four quadrants of the coordinate space as
+ * divided by a pivot point also stored in the parent block.
  */
 
 /** The number of points that fit into a single SIMD register.
@@ -163,7 +190,7 @@ enum quadrant : int {
  *
  * @returns index of topmost block created.
  */
-uint32_t enblock(SearchContext& sc, Point* begin, Point* end)
+uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
 {
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
     int available = (int)std::distance(begin, end);
@@ -181,9 +208,9 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end)
         return 0;
     }
 
-    uint32_t result = (uint32_t)sc.blocks.size();
-    sc.blocks.push_back(block{});
-    block& b = sc.blocks.back();
+    uint32_t result = (uint32_t)blocks.size();
+    blocks.push_back(block{});
+    block& b = blocks.back();
 
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
@@ -274,12 +301,15 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end)
             return pt.y < sepy;
         });
 
-        uint32_t lxly = enblock(sc, begin, ysplit1);
-        uint32_t lxhy = enblock(sc, ysplit1, xsplit);
-        uint32_t hxly = enblock(sc, xsplit, ysplit2);
-        uint32_t hxhy = enblock(sc, ysplit2, end);
+        uint32_t lxly = enblock(blocks, begin, ysplit1);
+        uint32_t lxhy = enblock(blocks, ysplit1, xsplit);
+        uint32_t hxly = enblock(blocks, xsplit, ysplit2);
+        uint32_t hxhy = enblock(blocks, ysplit2, end);
 
-        block& parent = sc.blocks[result];
+        // The vector may have been resized, invalidating the previous
+        // reference to the block. Therefore, look it up by index after
+        // generating children.
+        block& parent = blocks[result];
         parent.children[quadrant::lxly] = lxly;
         parent.children[quadrant::lxhy] = lxhy;
         parent.children[quadrant::hxly] = hxly;
@@ -304,7 +334,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    int bindex = enblock(*sc, &points.data()[0], &points.data()[count]);
+    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count]);
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
@@ -327,26 +357,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     return sc;
 };
 
-#ifndef NDEBUG
-int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
-    auto end = sc->points.cend();
-    auto pos = sc->points.cbegin();
-    auto outptr = out_points;
-    auto outend = outptr + count;
-    while (pos != end) {
-        if (pos->x >= rect.lx && pos->x <= rect.hx && pos->y >= rect.ly && pos->y <= rect.hy) {
-            *outptr++ = *pos;
-            if (outptr == outend) {
-                break;
-            }
-        }
-        ++pos;
-    }
-    auto result = (int32_t)std::distance(out_points, outptr);
-
-    return result;
-};
-#endif
+}
 
 /** Point representation stored in priority queue.
  *
@@ -459,8 +470,11 @@ static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqu
     }
 }
 
-/** The actual search algorithm. */
-int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
+extern "C" {
+
+/** Release build search API entry-point.
+*/
+__declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
     // Prepare search bounds for SIMD comparison.
     __m128 lxs = _mm_load1_ps(&rect.lx);
@@ -581,7 +595,7 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
 
     int left = count;
 
-    // Remove any invalid points which has been retained since the priority
+    // Remove any invalid points which has been retained from when the priority
     // queue was initialized. If any still exists, that means that the search
     // found less points than the number that was requested.
     while (left != 0 && bestheap->rankid == std::numeric_limits<uint32_t>::max()) {
@@ -605,16 +619,43 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
     return result;
 };
 
-/** Search API entry-point.
- */
-__declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
-#ifndef NDEBUG 
-    std::vector<Point> goodbuf(count);
-    auto goodresult = search_good(sc, rect, count, &goodbuf.front());
-#endif
-    auto result = search_alt(sc, rect, count, out_points);
+/** Free memory used by search context.
+*/
+__declspec(dllexport) SearchContext* __stdcall destroy(SearchContext* sc) {
+    delete sc;
+    return nullptr;
+};
+
+// Debugging support that is not compiled in release builds follows.
 
 #ifndef NDEBUG 
+/** Naive search algorithm used for comparison during debugging. */
+__declspec(dllexport) int32_t __stdcall search_good(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+    auto end = sc->points.cend();
+    auto pos = sc->points.cbegin();
+    auto outptr = out_points;
+    auto outend = outptr + count;
+    while (pos != end) {
+        if (pos->x >= rect.lx && pos->x <= rect.hx && pos->y >= rect.ly && pos->y <= rect.hy) {
+            *outptr++ = *pos;
+            if (outptr == outend) {
+                break;
+            }
+        }
+        ++pos;
+    }
+    auto result = (int32_t)std::distance(out_points, outptr);
+
+    return result;
+};
+
+/** Debug build search API entry-point.
+ */
+__declspec(dllexport) int32_t __stdcall search_debug(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points) {
+    std::vector<Point> goodbuf(count);
+    auto goodresult = search_good(sc, rect, count, &goodbuf.front());
+    auto result = search_fast(sc, rect, count, out_points);
+
     assert(result == goodresult);
 
     for (int i = 0; i < result; ++i) {
@@ -629,17 +670,9 @@ __declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rec
     }
 
     assert(memcmp(goodbuf.data(), out_points, result * sizeof(Point)) == 0);
-#endif
 
     return result;
 };
-
-
-/** Free memory used by search context.
- */
-__declspec(dllexport) SearchContext* __stdcall destroy(SearchContext* sc) {
-    delete sc;
-    return nullptr;
-};
+#endif
 
 }
