@@ -17,7 +17,13 @@
 // Timing of some higher seems to on average be better, but also vary
 // greatly between runs.
 
-const int vectorsets_per_block = 1;
+// 2 faster than 1 75% of the time.
+// 2+pf:  FFFFFFFSSFSFFFSF  12/16: faster 75% of the time
+// 2+pfa: SSFFFFFFFFFFFSFF  13/16: faster 81% of the time
+// 4 SFFF: 4 faster than 1 75% of the time.
+// 8 FSSF: Toss up.
+
+const int vectorsets_per_block = 2;
 const int points_per_vectorset = 4;
 
 struct vectorset {
@@ -29,6 +35,7 @@ struct vectorset {
 struct block {
     vectorset vectors[vectorsets_per_block];
     uint32_t children[4];
+    uint32_t pad[4];
 };
 
 struct SearchContext {
@@ -154,9 +161,9 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
     for (int i = 0; i < count; ++i) {
         Point& p = candidates[i];
         vectorset& vs = b.vectors[i/points_per_vectorset];
-        vs.xs[i] = p.x;
-        vs.ys[i] = p.y;
-        vs.rankid[i] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
+        vs.xs[i % points_per_vectorset] = p.x;
+        vs.ys[i % points_per_vectorset] = p.y;
+        vs.rankid[i % points_per_vectorset] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
     }
 
     // Partition remaining points and enblock them into children.
@@ -365,6 +372,7 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         dequeue_index = (dequeue_index + 1) & queuemask;
         if (enqueue_index != dequeue_index) {
             _mm_prefetch((const char*)(&aligned_begin[queue[dequeue_index]]), _MM_HINT_T0);
+            _mm_prefetch(((const char*)(&aligned_begin[queue[dequeue_index]]) + 64), _MM_HINT_T0);
         }
 
         __m128i seen_better = _mm_setzero_si128();
