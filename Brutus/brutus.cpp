@@ -147,6 +147,9 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
 
         for (int i = 0; i < points_per_vectorset; ++i) {
             vs.xs[i] = std::numeric_limits<float>::max();
+            vs.ys[i] = std::numeric_limits<float>::max();
+            vs.rankid[i] = std::numeric_limits<uint32_t>::max();
+
         }
     }
  
@@ -332,6 +335,18 @@ static __forceinline void enqueue(SearchContext* sc, uint32_t*& queue, int& enqu
     }
 }
 
+enum spanflag : uint32_t {
+    lx = 0x80000000,
+    hx = 0x40000000,
+    ly = 0x20000000,
+    hy = 0x10000000,
+    all = 0xf0000000,
+    mask = 0x0fffffff,
+    xspan = 0xc0000000,
+    yspan = 0x30000000
+};
+
+
 int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
 
@@ -361,62 +376,136 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
     enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, 0);
 
     while (enqueue_index != dequeue_index) {
-        const block& b = aligned_begin[queue[dequeue_index]];
+        uint32_t blockdesc = queue[dequeue_index];
+        const block& b = aligned_begin[blockdesc & spanflag::mask];
         dequeue_index = (dequeue_index + 1) & queuemask;
         if (enqueue_index != dequeue_index) {
-            _mm_prefetch((const char*)(&aligned_begin[queue[dequeue_index]]), _MM_HINT_T0);
+            _mm_prefetch((const char*)(&aligned_begin[queue[dequeue_index & spanflag::mask]]), _MM_HINT_T0);
         }
 
-        __m128i seen_better = _mm_setzero_si128();
-        for (int vi = 0; vi < vectorsets_per_block; ++vi) {
-            uint32_t ranklimit = bestheap->rankid >> 8;
-            __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
-            const vectorset& vs = b.vectors[vi];
-            __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
-            __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
-            seen_better = _mm_or_si128(seen_better, betterv);
-            __m128 xs = _mm_load_ps(&vs.xs[0]);
-            __m128 ys = _mm_load_ps(&vs.ys[0]);
+        uint32_t preflags = blockdesc & spanflag::all;
+        if (preflags != spanflag::all) {
+            // Slow path where we must check bounds.
+            __m128i seen_better = _mm_setzero_si128();
+            for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+                uint32_t ranklimit = bestheap->rankid >> 8;
+                __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
+                const vectorset& vs = b.vectors[vi];
+                __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
+                __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
+                seen_better = _mm_or_si128(seen_better, betterv);
+                __m128 xs = _mm_load_ps(&vs.xs[0]);
+                __m128 ys = _mm_load_ps(&vs.ys[0]);
 
-            __m128i inboundsi = _mm_castps_si128(
-                _mm_and_ps(
-                    _mm_and_ps(_mm_cmple_ps(lxs, xs), _mm_cmple_ps(xs, hxs)),
-                    _mm_and_ps(_mm_cmple_ps(lys, ys), _mm_cmple_ps(ys, hys))));
+                __m128i inboundsi = _mm_castps_si128(
+                    _mm_and_ps(
+                        _mm_and_ps(_mm_cmple_ps(lxs, xs), _mm_cmple_ps(xs, hxs)),
+                        _mm_and_ps(_mm_cmple_ps(lys, ys), _mm_cmple_ps(ys, hys))));
 
-            __m128i dopush = _mm_and_si128(inboundsi, betterv);
+                __m128i dopush = _mm_and_si128(inboundsi, betterv);
 
-            for (int i = 0; i < points_per_vectorset; ++i) {
-                if ((dopush.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
+                for (int i = 0; i < points_per_vectorset; ++i) {
+                    if ((dopush.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
+                        pop_heap_raw((char*)(void*)bestheap, count);
+                        push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
+                    }
+                }
+            }
+
+            if (!(_mm_test_all_zeros(seen_better, seen_better))) {
+                float x = b.vectors[vectorsets_per_block - 1].xs[points_per_vectorset - 1];
+                float y = b.vectors[vectorsets_per_block - 1].ys[points_per_vectorset - 1];
+                bool islx = rect.lx < x;
+                bool ishx = rect.hx >= x;
+                bool isly = rect.ly < y;
+                bool ishy = rect.hy >= y;
+
+                uint32_t xspan = (islx && ishx) * spanflag::xspan;
+                uint32_t yspan = (isly && ishy) * spanflag::yspan;
+                uint32_t spandirections = xspan | yspan;
+                /*
+                               <-xspan->
+                                   |
+                                   |
+                             lxhy  |  hxhy      ^
+                                   |            |
+                           --------+--------  yspan
+                                   |            |
+                             lxly  |  hxly      V
+                                   |
+                                   |
+                       hy
+                    +------+
+                    |      |
+                  lx|      |hx
+                    |      |
+                    +------+
+                       ly
+            
+                */
+
+
+                if (islx && isly && b.children[lxly]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly] | preflags | ((spanflag::hx | spanflag::hy) & spandirections));
+                }
+
+                if (islx && ishy && b.children[lxhy]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxhy] | preflags | ((spanflag::hx | spanflag::ly) & spandirections));
+                }
+
+                if (ishx && isly && b.children[hxly]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxly] | preflags | ((spanflag::lx | spanflag::hy) & spandirections));
+                }
+
+                if (ishx && ishy && b.children[hxhy]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxhy] | preflags | ((spanflag::lx | spanflag::ly) & spandirections));
+                }
+            }
+
+        }
+        else
+        {
+            // Fast path where bounds checking is not needed.
+
+            __m128i seen_better = _mm_setzero_si128();
+            for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+                uint32_t ranklimit = bestheap->rankid >> 8;
+                __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
+                const vectorset& vs = b.vectors[vi];
+                __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
+                __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
+                seen_better = _mm_or_si128(seen_better, betterv);
+
+                for (int i = 0; i < points_per_vectorset; ++i) {
+                    if (betterv.m128i_i32[i] != 0) {
+                        if (bestheap->rankid > vs.rankid[i]) {
+                            pop_heap_raw((char*)(void*)bestheap, count);
+                            push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
+                        }
+                    }
+                }
+            }
+
+            if (!(_mm_test_all_zeros(seen_better, seen_better))) {
+                if (b.children[lxly]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly] | spanflag::all);
+                }
+
+                if (b.children[lxhy]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxhy] | spanflag::all);
+                }
+
+                if (b.children[hxly]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxly] | spanflag::all);
+                }
+
+                if (b.children[hxhy]) {
+                    enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxhy] | spanflag::all);
                 }
             }
         }
 
-        if (!(_mm_test_all_zeros(seen_better, seen_better))) {
-            float x = b.vectors[vectorsets_per_block - 1].xs[points_per_vectorset - 1];
-            float y = b.vectors[vectorsets_per_block - 1].ys[points_per_vectorset - 1];
-            bool islx = rect.lx < x;
-            bool ishx = rect.hx >= x;
-            bool isly = rect.ly < y;
-            bool ishy = rect.hy >= y;
 
-            if (islx && isly && b.children[lxly]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly]);
-            }
-
-            if (islx && ishy && b.children[lxhy]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxhy]);
-            }
-
-            if (ishx && isly && b.children[hxly]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxly]);
-            }
-
-            if (ishx && ishy && b.children[hxhy]) {
-                enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[hxhy]);
-            }
-        }
     }
 
     assert(enqueue_index == dequeue_index);
