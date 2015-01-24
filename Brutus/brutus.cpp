@@ -35,7 +35,9 @@ struct vectorset {
 struct block {
     vectorset vectors[vectorsets_per_block];
     uint32_t children[4];
-    uint32_t pad[4];
+    float sepx;
+    float sepy;
+    char pad[8];
 };
 
 struct SearchContext {
@@ -130,17 +132,10 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
     int available = (int)std::distance(begin, end);
     int count;
-    bool balance = false;
+    // TODO: Tune
+    bool balance = (available > maxpoints * 3) && (depth < 8);
     if (available > maxpoints) {
-        // TODO: Tune
-        if ((available > maxpoints * 3) && (depth < 8)) {
-            balance = true;
-            count = maxpoints - 1;
-        }
-        else {
             count = maxpoints;
-        }
-
     }
     else
     {
@@ -159,21 +154,13 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
 
+    float sepx;
+    float sepy;
 
     // Move most center point to end of block.
     int bestindex = find_centermost_candidate(candidates);
-    if (bestindex != count - 1) {
-        std::swap(candidates[bestindex], candidates[count - 1]);
-    }
-
-    // Make all point values initally inert.
-    for (int vi = 0; vi < vectorsets_per_block; ++vi) {
-        vectorset& vs = b.vectors[vi];
-
-        for (int i = 0; i < points_per_vectorset; ++i) {
-            vs.xs[i] = std::numeric_limits<float>::max();
-        }
-    }
+    sepx = candidates[bestindex].x;
+    sepy = candidates[bestindex].y;
     if (balance) {
         std::vector<float> xrem;
         xrem.reserve(remaining);
@@ -183,7 +170,7 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
 
         std::sort(xrem.begin(), xrem.end());
         int mid = remaining / 2;
-        float sepx = xrem[mid];
+        sepx = xrem[mid];
 
         std::vector<float> yrem1;
         yrem1.reserve(remaining / 2 + 1);
@@ -202,7 +189,6 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
         std::sort(yrem1.begin(), yrem1.end());
         std::sort(yrem2.begin(), yrem2.end());
 
-        float sepy;
         if (yrem1.empty()) {
             sepy = yrem2[yrem2.size() / 2];
         }
@@ -214,10 +200,18 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
         {
             sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
         }
+    }
 
-        // Add synthetic pivot:
-        Point pivot{ 0, 0xFFFFFF, sepx, sepy };
-        candidates.push_back(pivot);
+    b.sepx = sepx;
+    b.sepy = sepy;
+
+    // Make all point values initally inert.
+    for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+        vectorset& vs = b.vectors[vi];
+
+        for (int i = 0; i < points_per_vectorset; ++i) {
+            vs.xs[i] = std::numeric_limits<float>::max();
+        }
     }
 
  
@@ -232,12 +226,6 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
 
     // Partition remaining points and enblock them into children.
     if (remaining) {
-        float sepx = candidates.back().x;
-        float sepy = candidates.back().y;
-
-        // Compute a good separator.
-        
-
         Point* xsplit = std::stable_partition(begin, end, [=](const Point& pt) {
             return pt.x < sepx;
         });
@@ -469,12 +457,10 @@ int32_t __stdcall search_alt(SearchContext* sc, const Rect rect, const int32_t c
         }
 
         if (!(_mm_test_all_zeros(seen_better, seen_better))) {
-            float x = b.vectors[vectorsets_per_block - 1].xs[points_per_vectorset - 1];
-            float y = b.vectors[vectorsets_per_block - 1].ys[points_per_vectorset - 1];
-            bool islx = rect.lx < x;
-            bool ishx = rect.hx >= x;
-            bool isly = rect.ly < y;
-            bool ishy = rect.hy >= y;
+            bool islx = rect.lx < b.sepx;
+            bool ishx = rect.hx >= b.sepx;
+            bool isly = rect.ly < b.sepy;
+            bool ishy = rect.hy >= b.sepy;
 
             if (islx && isly && b.children[lxly]) {
                 enqueue(sc, queue, enqueue_index, dequeue_index, queuemask, b.children[lxly]);
@@ -525,8 +511,22 @@ __declspec(dllexport) int32_t __stdcall search(SearchContext* sc, const Rect rec
 
 #ifndef NDEBUG 
     assert(result == goodresult);
+
+    for (int i = 0; i < result; ++i) {
+        Point good = goodbuf[i];
+
+        Point point = out_points[i];
+
+        assert(good.id == point.id);
+        assert(good.rank == point.rank);
+        assert(good.x == point.x);
+        assert(good.y == point.y);
+    }
+
     assert(memcmp(goodbuf.data(), out_points, result * sizeof(Point)) == 0);
 #endif
+
+
     return result;
 };
 
