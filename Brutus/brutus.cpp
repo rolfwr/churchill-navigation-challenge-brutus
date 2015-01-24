@@ -125,11 +125,29 @@ int find_centermost_candidate(const std::vector<Point>& candidates) {
     return (int)std::distance(distances.begin(), best);
 }
 
-uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
+uint32_t enblock(SearchContext& sc, Point* begin, Point* end, int depth) {
 
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
+    int available = (int)std::distance(begin, end);
+    int count;
+    bool balance = false;
+    if (available > maxpoints) {
+        // TODO: Tune
+        if ((available > maxpoints * 3) && (depth < 8)) {
+            balance = true;
+            count = maxpoints - 1;
+        }
+        else {
+            count = maxpoints;
+        }
 
-    auto count = std::min((int)std::distance(begin, end), maxpoints);
+    }
+    else
+    {
+        count = available;
+    }
+
+    int remaining = available - count;
     if (count == 0) {
         return 0;
     }
@@ -156,9 +174,55 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
             vs.xs[i] = std::numeric_limits<float>::max();
         }
     }
+    if (balance) {
+        std::vector<float> xrem;
+        xrem.reserve(remaining);
+        for (int i = 0; i < remaining; ++i) {
+            xrem.push_back(begin[i].x);
+        }
+
+        std::sort(xrem.begin(), xrem.end());
+        int mid = remaining / 2;
+        float sepx = xrem[mid];
+
+        std::vector<float> yrem1;
+        yrem1.reserve(remaining / 2 + 1);
+        std::vector<float> yrem2;
+        yrem2.reserve(remaining / 2 + 1);
+
+        for (int i = 0; i < remaining; ++i) {
+            if (begin[i].x < sepx) {
+                yrem1.push_back(begin[i].y);
+            }
+            else {
+                yrem2.push_back(begin[i].y);
+            }
+        }
+
+        std::sort(yrem1.begin(), yrem1.end());
+        std::sort(yrem2.begin(), yrem2.end());
+
+        float sepy;
+        if (yrem1.empty()) {
+            sepy = yrem2[yrem2.size() / 2];
+        }
+        else if (yrem2.empty())
+        {
+            sepy = yrem1[yrem1.size() / 2];
+        }
+        else
+        {
+            sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
+        }
+
+        // Add synthetic pivot:
+        Point pivot{ 0, 0xFFFFFF, sepx, sepy };
+        candidates.push_back(pivot);
+    }
+
  
     // Fill in the vector sets with available points.
-    for (int i = 0; i < count; ++i) {
+    for (int i = 0; i < candidates.size(); ++i) {
         Point& p = candidates[i];
         vectorset& vs = b.vectors[i/points_per_vectorset];
         vs.xs[i % points_per_vectorset] = p.x;
@@ -167,9 +231,12 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
     }
 
     // Partition remaining points and enblock them into children.
-    if (count == maxpoints) {
-        float sepx = candidates[count - 1].x;
-        float sepy = candidates[count - 1].y;
+    if (remaining) {
+        float sepx = candidates.back().x;
+        float sepy = candidates.back().y;
+
+        // Compute a good separator.
+        
 
         Point* xsplit = std::stable_partition(begin, end, [=](const Point& pt) {
             return pt.x < sepx;
@@ -183,10 +250,10 @@ uint32_t enblock(SearchContext& sc, Point* begin, Point* end) {
             return pt.y < sepy;
         });
 
-        uint32_t lxly = enblock(sc, begin, ysplit1);
-        uint32_t lxhy = enblock(sc, ysplit1, xsplit);
-        uint32_t hxly = enblock(sc, xsplit, ysplit2);
-        uint32_t hxhy = enblock(sc, ysplit2, end);
+        uint32_t lxly = enblock(sc, begin, ysplit1, depth + 1);
+        uint32_t lxhy = enblock(sc, ysplit1, xsplit, depth + 1);
+        uint32_t hxly = enblock(sc, xsplit, ysplit2, depth + 1);
+        uint32_t hxhy = enblock(sc, ysplit2, end, depth + 1);
         
         block& parent = sc.blocks[result];
         parent.children[quadrant::lxly] = lxly;
@@ -213,7 +280,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    int bindex = enblock(*sc, &sc->points.data()[0], &sc->points.data()[count]);
+    int bindex = enblock(*sc, &sc->points.data()[0], &sc->points.data()[count], 0);
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
