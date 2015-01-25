@@ -574,10 +574,31 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             __m128i dopush = _mm_and_si128(inboundsi, betterv);
 
             // Add better matches to priority queue.
-            for (int i = 0; i < points_per_vectorset; ++i) {
-                if ((dopush.m128i_i32[i] != 0) && bestheap->rankid > vs.rankid[i]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[i], vs.xs[i], vs.ys[i]);
+            int pushmask = _mm_movemask_epi8(dopush);
+            if (pushmask) {
+                if (pushmask & 0x0001) {
+                    if (bestheap->rankid > vs.rankid[0]) {
+                        pop_heap_raw((char*)(void*)bestheap, count);
+                        push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
+                    }
+                }
+                if (pushmask & 0x0010) {
+                    if (bestheap->rankid > vs.rankid[1]) {
+                        pop_heap_raw((char*)(void*)bestheap, count);
+                        push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
+                    }
+                }
+                if (pushmask & 0x0100) {
+                    if (bestheap->rankid > vs.rankid[2]) {
+                        pop_heap_raw((char*)(void*)bestheap, count);
+                        push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
+                    }
+                }
+                if (pushmask & 0x1000) {
+                    if (bestheap->rankid > vs.rankid[3]) {
+                        pop_heap_raw((char*)(void*)bestheap, count);
+                        push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
+                    }
                 }
             }
         }
