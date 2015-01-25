@@ -471,11 +471,22 @@ struct ring_buffer {
     {
     }
 
-    /** Add index of block to process later to the ring buffer. */
-    __forceinline void enqueue(SearchContext* sc, uint32_t value) {
+    /** Add index of block to process later to the ring buffer.
+     * 
+     * This function assumes there is sufficient space in the ring buffer to
+     * add the new value. Call ensure_space() to ensure that such space is
+     * available.
+     */
+    __forceinline void enqueue(uint32_t value) {
         buffer[enqueue_index] = value;
         enqueue_index = (enqueue_index + 1) & mask;
         if (enqueue_index == dequeue_index) {
+        }
+    }
+
+    __forceinline void ensure_space(SearchContext* sc) {
+        int diff = (dequeue_index - enqueue_index) & mask;
+        if (diff && diff < 4) {
             // The initial queue should be sized so that it is unlikely this will ever be called.
             buffer = sc->enlarge(dequeue_index);
             mask = sc->get_mask();
@@ -525,7 +536,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
  
     // Start on the root block. All other blocks to be searched will be found
     // from there.
-    queue.enqueue(sc, 0);
+    queue.enqueue(0);
 
     // Loop until no more blocks remain in queue.
     while (queue.contains_values()) {
@@ -593,20 +604,22 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             // Only add the blocks whose quadrant intersect with the search
             // bounds.
 
+            queue.ensure_space(sc);
+
             if (islx && isly && b.children[lxly]) {
-                queue.enqueue(sc, b.children[lxly]);
+                queue.enqueue(b.children[lxly]);
             }
 
             if (islx && ishy && b.children[lxhy]) {
-                queue.enqueue(sc, b.children[lxhy]);
+                queue.enqueue(b.children[lxhy]);
             }
 
             if (ishx && isly && b.children[hxly]) {
-                queue.enqueue(sc, b.children[hxly]);
+                queue.enqueue(b.children[hxly]);
             }
 
             if (ishx && ishy && b.children[hxhy]) {
-                queue.enqueue(sc, b.children[hxhy]);
+                queue.enqueue(b.children[hxhy]);
             }
         }
     }
