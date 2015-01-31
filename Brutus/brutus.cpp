@@ -555,12 +555,13 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         const vectorset& vs = b.vectors[0];
         uint32_t ranklimit = bestheap->rankid >> 8;
         __m128i ranklimitv = _mm_set1_epi32(ranklimit);
-        __m128i ranks_hi = _mm_load_si128((const __m128i*)&vs.rankid[4]);
 
-        __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8));
+        __m128i ranks_lo = _mm_load_si128((const __m128i*)&vs.rankid[0]);
+        __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(ranks_lo, 8));
         __m128 betterv_lo = _mm_castsi128_ps(bettervi_lo);
 
-        __m128i bettervi_hi = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[4]), 8));
+        __m128i ranks_hi = _mm_load_si128((const __m128i*)&vs.rankid[4]);
+        __m128i bettervi_hi = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(ranks_hi, 8));
         __m128 betterv_hi = _mm_castsi128_ps(bettervi_hi);
 
         __m256 betterv = _mm256_castps128_ps256(betterv_lo);
@@ -580,49 +581,49 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             if (pushmask & 0x0001) {
                 if (bestheap->rankid > vs.rankid[0]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
+                    push_heap(bestheap, count - 1, ranks_lo.m128i_u32[0], xs.m256_f32[0], ys.m256_f32[0]);
                 }
             }
             if (pushmask & 0x0002) {
                 if (bestheap->rankid > vs.rankid[1]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
+                    push_heap(bestheap, count - 1, ranks_lo.m128i_u32[1], xs.m256_f32[1], ys.m256_f32[1]);
                 }
             }
             if (pushmask & 0x0004) {
                 if (bestheap->rankid > vs.rankid[2]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
+                    push_heap(bestheap, count - 1, ranks_lo.m128i_u32[2], xs.m256_f32[2], ys.m256_f32[2]);
                 }
             }
             if (pushmask & 0x0008) {
                 if (bestheap->rankid > vs.rankid[3]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
+                    push_heap(bestheap, count - 1, ranks_lo.m128i_u32[3], xs.m256_f32[3], ys.m256_f32[3]);
                 }
             }
             if (pushmask & 0x0010) {
                 if (bestheap->rankid > vs.rankid[4]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[4], vs.xs[4], vs.ys[4]);
+                    push_heap(bestheap, count - 1, ranks_hi.m128i_u32[0], xs.m256_f32[4], ys.m256_f32[4]);
                 }
             }
             if (pushmask & 0x0020) {
                 if (bestheap->rankid > vs.rankid[5]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[5], vs.xs[5], vs.ys[5]);
+                    push_heap(bestheap, count - 1, ranks_hi.m128i_u32[1], xs.m256_f32[5], ys.m256_f32[5]);
                 }
             }
             if (pushmask & 0x0040) {
                 if (bestheap->rankid > vs.rankid[6]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[6], vs.xs[6], vs.ys[6]);
+                    push_heap(bestheap, count - 1, ranks_hi.m128i_u32[2], xs.m256_f32[6], ys.m256_f32[6]);
                 }
             }
             if (pushmask & 0x0080) {
                 if (bestheap->rankid > vs.rankid[7]) {
                     pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[7], vs.xs[7], vs.ys[7]);
+                    push_heap(bestheap, count - 1, ranks_hi.m128i_u32[3], xs.m256_f32[7], ys.m256_f32[7]);
                 }
             }
         }
