@@ -149,6 +149,9 @@ struct compressed_point {
     float y;
 };
 
+
+typedef uint32_t heap_point;
+
 /** Contains the preprocessed data and preallocated buffers.
  */
 struct SearchContext {
@@ -159,7 +162,8 @@ struct SearchContext {
     std::vector<Point> points;
 #endif
 
-    compressed_point heap[max_requested_points];
+    heap_point heap[max_requested_points];
+    compressed_point bestdata[max_requested_points];
 
     /** Allocated memory for storing the blocks of the search tree.
      *
@@ -394,12 +398,12 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
  *
  */
 static __forceinline uint32_t& getrankid(char* p) {
-    return *((uint32_t*)(p + offsetof(compressed_point, rankid)));
+    return *((heap_point*)(p));
 }
 
 /** Copy a compressed_point from one memory location to another. */
 static __forceinline void copy_point(char* dest, char* src) {
-    *((compressed_point*)dest) = *((compressed_point*)src);
+    *((heap_point*)dest) = *((heap_point*)src);
 }
 
 /** Remove point with the highest rank value from the priority queue.
@@ -407,16 +411,17 @@ static __forceinline void copy_point(char* dest, char* src) {
  * This removes the point at the start of the heap, and frees up a slot
  * for a new point at the end of the heap.
  */
-static __forceinline void pop_heap_raw(char* heap, int count) {
-    int end = (count - 1) * sizeof(compressed_point);
+static __forceinline uint8_t pop_heap_raw(char* heap, int count) {
+    uint8_t freeindex = (uint8_t)(*((heap_point*)heap));
+    int end = (count - 1) * sizeof(heap_point);
 
     uint32_t value = getrankid(heap + end);
     // Find insert point.
     int i = 0;
     int c1;
     while (true) {
-        c1 = i * 2 + sizeof(compressed_point) * 1;
-        int c2 = i * 2 + sizeof(compressed_point) * 2;
+        c1 = i * 2 + sizeof(heap_point) * 1;
+        int c2 = i * 2 + sizeof(heap_point) * 2;
         if (c1 >= end) {
             goto insert;
         }
@@ -444,15 +449,24 @@ last:
 
 insert:
     copy_point(heap + i, heap + end);
+
+    return freeindex;
 }
 
 /** Add point to priority queue which has a free slot at the end of the heap.
  */
-static __forceinline void push_heap(compressed_point* heap, int lastpos, uint32_t newrankid, float x, float y) {
+static __forceinline void pop_push_heap(heap_point* heap, int count, compressed_point* bestdata, uint32_t newrankid, float x, float y) {
+    uint8_t index = pop_heap_raw((char*)(void*)heap, count);
+    int lastpos = count - 1;
+    compressed_point* slot = bestdata + index;
+    slot->rankid = newrankid;
+    slot->x = x;
+    slot->y = y;
+
     assert(lastpos != 0);
     do {
         int parent = (lastpos - 1) / 2;
-        if (heap[parent].rankid >= newrankid) {
+        if (heap[parent] >= newrankid) {
             break;
         }
 
@@ -461,9 +475,7 @@ static __forceinline void push_heap(compressed_point* heap, int lastpos, uint32_
     } while (lastpos != 0);
 
     
-    heap[lastpos].rankid = newrankid;
-    heap[lastpos].x = x;
-    heap[lastpos].y = y;
+    heap[lastpos] = newrankid & 0xFFFFFF00 | index;
 }
 
 struct process_queue {
@@ -517,13 +529,14 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         return 0;
     }
 
-    compressed_point* bestheap = sc->heap;
+    heap_point* bestheap = sc->heap;
+    compressed_point* bestdata = sc->bestdata;
 
     // Fill the priority queue initially with invalid points, which will be
     // replaced as the search commences, and will be filtered out from the
     // search result if they remain after the search loop completes.
-    for (int i = 0; i < count; ++i) {
-        bestheap[i].rankid = std::numeric_limits<uint32_t>::max();
+    for (uint8_t i = 0; i < count; ++i) {
+        bestheap[i] = 0xFFFFFF00 | i;
     }
  
     // Start on the root block. All other blocks to be searched will be found
@@ -560,7 +573,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             //      priority queue.
             //   2. Has a coordinate which is inside the search bounds.
 
-            uint32_t ranklimit = bestheap->rankid >> 8;
+            uint32_t ranklimit = (*bestheap) >> 8;
             __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
             const vectorset& vs = b.vectors[vi];
             __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
@@ -580,27 +593,23 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             int pushmask = _mm_movemask_epi8(dopush);
             if (pushmask) {
                 if (pushmask & 0x0001) {
-                    if (bestheap->rankid > vs.rankid[0]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
+                    if ((*bestheap) > vs.rankid[0]) {
+                        pop_push_heap(bestheap, count, bestdata, vs.rankid[0], vs.xs[0], vs.ys[0]);
                     }
                 }
                 if (pushmask & 0x0010) {
-                    if (bestheap->rankid > vs.rankid[1]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
+                    if ((*bestheap) > vs.rankid[1]) {
+                        pop_push_heap(bestheap, count, bestdata, vs.rankid[1], vs.xs[1], vs.ys[1]);
                     }
                 }
                 if (pushmask & 0x0100) {
-                    if (bestheap->rankid > vs.rankid[2]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
+                    if ((*bestheap) > vs.rankid[2]) {
+                        pop_push_heap(bestheap, count, bestdata, vs.rankid[2], vs.xs[2], vs.ys[2]);
                     }
                 }
                 if (pushmask & 0x1000) {
-                    if (bestheap->rankid > vs.rankid[3]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
+                    if ((*bestheap) > vs.rankid[3]) {
+                        pop_push_heap(bestheap, count, bestdata, vs.rankid[3], vs.xs[3], vs.ys[3]);
                     }
                 }
             }
@@ -642,7 +651,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     // Remove any invalid points which has been retained from when the priority
     // queue was initialized. If any still exists, that means that the search
     // found less points than the number that was requested.
-    while (left != 0 && bestheap->rankid == std::numeric_limits<uint32_t>::max()) {
+    while (left != 0 && ((*bestheap) >= 0xFFFFFF00)) {
         pop_heap_raw((char*)(void*)bestheap, left);
         --left;
     }
@@ -652,10 +661,12 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     // is expected.
     uint32_t result = left;
     for (int i = ((int)result) - 1; i >= 0; --i) {
-        out_points[i].id = (int8_t)(bestheap->rankid);
-        out_points[i].rank = bestheap->rankid >> 8;
-        out_points[i].x = bestheap->x;
-        out_points[i].y = bestheap->y;
+        uint8_t index = (uint8_t)(*bestheap);
+        const compressed_point& p = bestdata[index];
+        out_points[i].id = (int8_t)(p.rankid);
+        out_points[i].rank = p.rankid >> 8;
+        out_points[i].x = p.x;
+        out_points[i].y = p.y;
         pop_heap_raw((char*)(void*)bestheap, left);
         --left;
     }
