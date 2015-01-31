@@ -48,14 +48,14 @@
  * several points at a time, rather than doing them one by one.
  *
  * While the Intel i5-4250U CPU of target machine supports the AVX2 SIMD
- * instruction set which supports 512 bit wide registers, the machine I'm
- * developing on unfortunately only has SSE4.2 which only supports 128 bit wide
- * registers.
+ * instruction set which supports 512 bit wide registers, the newst development
+ * machine I could get my hands on unfortunately only has AVX which only
+ * supports 256 bit wide registers.
  * 
- * An 128 bit wide register can contain four float values, e.g. four x
- * coordinate values or four y coordinate values.
+ * A 256 bit wide register can contain eight float values, e.g. eight x
+ * coordinate values or eight y coordinate values.
  */
-const int points_per_vectorset = 4;
+const int points_per_vectorset = 8;
 
 /** The number of SIMD passes that will be performed on a single block.
  *
@@ -63,7 +63,7 @@ const int points_per_vectorset = 4;
  * space by only tranversing down specific branches of the subtree, and
  * performing processing of blocks of memory that have good cache locality.
  */
-const int vectorsets_per_block = 2;
+const int vectorsets_per_block = 1;
 
 /** Maximum number of blocks that needs to be processed during a search.
  *
@@ -505,10 +505,10 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     assert(count <= max_requested_points);
 
     // Prepare search bounds for SIMD comparison.
-    __m128 lxs = _mm_load1_ps(&rect.lx);
-    __m128 hxs = _mm_load1_ps(&rect.hx);
-    __m128 lys = _mm_load1_ps(&rect.ly);
-    __m128 hys = _mm_load1_ps(&rect.hy);
+    __m256 lxs = _mm256_set1_ps(rect.lx);
+    __m256 hxs = _mm256_set1_ps(rect.hx);
+    __m256 lys = _mm256_set1_ps(rect.ly);
+    __m256 hys = _mm256_set1_ps(rect.hy);
 
     process_queue queue(&sc->process_queue_buffer[0]);
 
@@ -544,71 +544,97 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             _mm_prefetch(memloc + 64, _MM_HINT_T0);
         }
 
-        // If we don't see any rank values that are lower than the rank
-        // highest value we've already found, then we know that there is no
-        // reason to examine any of the child blocks, since they will only
-        // contain even higher rank values.
-        __m128i seen_better = _mm_setzero_si128();
+        // This is the inner loop of SIMD instructions. This instructions
+        // basically checks each point in a single vectorset for the
+        // following boolean properties:
+        //
+        //   1. Has rank value lower than the highest rank value in the
+        //      priority queue.
+        //   2. Has a coordinate which is inside the search bounds.
 
-        for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+        const vectorset& vs = b.vectors[0];
+        uint32_t ranklimit = bestheap->rankid >> 8;
+        __m128i ranklimitv = _mm_set1_epi32(ranklimit);
+        __m128i ranks_hi = _mm_load_si128((const __m128i*)&vs.rankid[4]);
 
-            // This is the inner loop of SIMD instructions. This instructions
-            // basically checks each point in a single vectorset for the
-            // following boolean properties:
-            //
-            //   1. Has rank value lower than the highest rank value in the
-            //      priority queue.
-            //   2. Has a coordinate which is inside the search bounds.
+        __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8));
+        __m128 betterv_lo = _mm_castsi128_ps(bettervi_lo);
 
-            uint32_t ranklimit = bestheap->rankid >> 8;
-            __m128i ranklimitv = _mm_set_epi32(ranklimit, ranklimit, ranklimit, ranklimit);
-            const vectorset& vs = b.vectors[vi];
-            __m128i ranks = _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8);
-            __m128i betterv = _mm_cmpgt_epi32(ranklimitv, ranks);
-            seen_better = _mm_or_si128(seen_better, betterv);
-            __m128 xs = _mm_load_ps(&vs.xs[0]);
-            __m128 ys = _mm_load_ps(&vs.ys[0]);
+        __m128i bettervi_hi = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[4]), 8));
+        __m128 betterv_hi = _mm_castsi128_ps(bettervi_hi);
 
-            __m128i inboundsi = _mm_castps_si128(
-                _mm_and_ps(
-                    _mm_and_ps(_mm_cmple_ps(lxs, xs), _mm_cmple_ps(xs, hxs)),
-                    _mm_and_ps(_mm_cmple_ps(lys, ys), _mm_cmple_ps(ys, hys))));
+        __m256 betterv = _mm256_castps128_ps256(betterv_lo);
+        __m256 xs = _mm256_load_ps(&vs.xs[0]);
+        __m256 ys = _mm256_load_ps(&vs.ys[0]);
 
-            __m128i dopush = _mm_and_si128(inboundsi, betterv);
+        __m256 inbound = _mm256_and_ps(
+            _mm256_and_ps(_mm256_cmp_ps(lxs, xs, _CMP_LE_OQ), _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ)),
+            _mm256_and_ps(_mm256_cmp_ps(lys, ys, _CMP_LE_OQ), _mm256_cmp_ps(ys, hys, _CMP_LE_OQ)));
+        betterv = _mm256_insertf128_ps(betterv, betterv_hi, 1);
 
-            // Add better matches to priority queue.
-            int pushmask = _mm_movemask_epi8(dopush);
-            if (pushmask) {
-                if (pushmask & 0x0001) {
-                    if (bestheap->rankid > vs.rankid[0]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
-                    }
+        int betteri = _mm256_movemask_ps(betterv);
+        int inboundi = _mm256_movemask_ps(inbound);
+        int pushmask = inboundi & betteri;
+
+        if (pushmask) {
+            if (pushmask & 0x0001) {
+                if (bestheap->rankid > vs.rankid[0]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
                 }
-                if (pushmask & 0x0010) {
-                    if (bestheap->rankid > vs.rankid[1]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
-                    }
+            }
+            if (pushmask & 0x0002) {
+                if (bestheap->rankid > vs.rankid[1]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
                 }
-                if (pushmask & 0x0100) {
-                    if (bestheap->rankid > vs.rankid[2]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
-                    }
+            }
+            if (pushmask & 0x0004) {
+                if (bestheap->rankid > vs.rankid[2]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
                 }
-                if (pushmask & 0x1000) {
-                    if (bestheap->rankid > vs.rankid[3]) {
-                        pop_heap_raw((char*)(void*)bestheap, count);
-                        push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
-                    }
+            }
+            if (pushmask & 0x0008) {
+                if (bestheap->rankid > vs.rankid[3]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
+                }
+            }
+            if (pushmask & 0x0010) {
+                if (bestheap->rankid > vs.rankid[4]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[4], vs.xs[4], vs.ys[4]);
+                }
+            }
+            if (pushmask & 0x0020) {
+                if (bestheap->rankid > vs.rankid[5]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[5], vs.xs[5], vs.ys[5]);
+                }
+            }
+            if (pushmask & 0x0040) {
+                if (bestheap->rankid > vs.rankid[6]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[6], vs.xs[6], vs.ys[6]);
+                }
+            }
+            if (pushmask & 0x0080) {
+                if (bestheap->rankid > vs.rankid[7]) {
+                    pop_heap_raw((char*)(void*)bestheap, count);
+                    push_heap(bestheap, count - 1, vs.rankid[7], vs.xs[7], vs.ys[7]);
                 }
             }
         }
 
+        // If we don't see any rank values that are lower than the rank
+        // highest value we've already found, then we know that there is no
+        // reason to examine any of the child blocks, since they will only
+        // contain even higher rank values.
+        //
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
-        if (!(_mm_test_all_zeros(seen_better, seen_better))) {
+        if (betteri) {
             bool islx = rect.lx < b.sepx;
             bool ishx = rect.hx >= b.sepx;
             bool isly = rect.ly < b.sepy;
