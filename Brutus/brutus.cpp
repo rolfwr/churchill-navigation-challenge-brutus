@@ -584,11 +584,17 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
                         pop_heap_raw((char*)(void*)bestheap, count);
                         push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
                     }
+                    else {
+                        goto branchexhausted;
+                    }
                 }
                 if (pushmask & 0x0010) {
                     if (bestheap->rankid > vs.rankid[1]) {
                         pop_heap_raw((char*)(void*)bestheap, count);
                         push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
+                    }
+                    else {
+                        goto branchexhausted;
                     }
                 }
                 if (pushmask & 0x0100) {
@@ -596,11 +602,17 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
                         pop_heap_raw((char*)(void*)bestheap, count);
                         push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
                     }
+                    else {
+                        goto branchexhausted;
+                    }
                 }
                 if (pushmask & 0x1000) {
                     if (bestheap->rankid > vs.rankid[3]) {
                         pop_heap_raw((char*)(void*)bestheap, count);
                         push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
+                    }
+                    else {
+                        goto branchexhausted;
                     }
                 }
             }
@@ -633,6 +645,9 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
                 queue.enqueue(sc, b.children[hxhy]);
             }
         }
+
+    branchexhausted:
+        ;
     }
 
     assert(!queue.contains_values());
