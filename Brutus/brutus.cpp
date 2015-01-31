@@ -65,6 +65,33 @@ const int points_per_vectorset = 4;
  */
 const int vectorsets_per_block = 2;
 
+/** Maximum number of blocks that needs to be processed during a search.
+ *
+ * There is an upper limit to the number of blocks that needs to be processed.
+ * Blocks that are entirely contained within the search bounds will quickly
+ * fulfil the number of points requested. Only blocks lying at the edge
+ * of the search bounds have a chance of increasing the number of blocks to
+ * be processed significantly. The worst case scenario is a long and thin
+ * search rect that spans all the points in one dimension while straddeling the
+ * edges pairs of bottommost blocks in the other dimension.
+ *
+ * That worst case would result in the number of blocks reaching something
+ * like:
+ *
+ *     2^(ceil(ln(10^7/points_per_vectorset/vectorsets_per_block)/ln(4))+2)
+ */
+const int max_block_process = 4096;
+
+/** Maximum number of points requested in a search query.
+ *
+ * All code practical limits for how many items they support, be it the maximum
+ * value of a given integer type or some other limiting factor. By explicitly
+ * specifying what that limit is we can perform optimizations that are not
+ * possible when the limit is an untested implict limitation of the
+ * implementation.
+ */
+const int max_requested_points = 20;
+
 /** The data that will be processed by a single SIMD pass.
  */
 struct vectorset {
@@ -105,6 +132,23 @@ struct block {
     char pad[8];
 };
 
+/** Point representation stored in priority queue.
+ *
+ * To be able to return a specified number of best ranked points, the search
+ * algorithm will maintain a collection of that number of points, which
+ * represent the best ranked points found so far.
+ *
+ * The priority queue is implemented as an array based heap data structure
+ * which makes it efficient to identify and replace the point with the highest
+ * rank value. The compressed_point struct is the representation of the point
+ * inside of this priority queue.
+ */
+struct compressed_point {
+    uint32_t rankid;
+    float x;
+    float y;
+};
+
 /** Contains the preprocessed data and preallocated buffers.
  */
 struct SearchContext {
@@ -114,6 +158,8 @@ struct SearchContext {
     // output from the fast search algorithm.
     std::vector<Point> points;
 #endif
+
+    compressed_point heap[max_requested_points];
 
     /** Allocated memory for storing the blocks of the search tree.
      *
@@ -131,40 +177,18 @@ struct SearchContext {
      */
     block* aligned_begin;
 
-    /** Allocated memory for containing a ring buffer of unprocessed blocks.
+    /** Queue of unprocessed blocks.
      *
-     * During search, applicable child buffer indicies will be added to one
-     * end of the ring buffer, while the search loop removes buffer indicies
-     * one by one from the other end.
-     *
-     * This buffer is always a power of two, to allow ring buffer wrapping to
-     * be implemented using bit masking.
+     * During search, applicable child buffer indicies will be added to one end
+     * of the queue, while the search loop removes buffer indicies one by one
+     * from the other end. To remove any overhead in maintaining the queue, the
+     * read and write pointers into the queue will always monotonically
+     * increase. I.e. there is no reuse what so ever of the memory in the
+     * queue. Each memory location is only ever written once, and read once.
      */
-    std::vector<uint32_t> remaining_buffer;
+    uint32_t process_queue_buffer[max_block_process];
 
-    SearchContext() : remaining_buffer(1024) {
-        // The ring buffer typically never needs more than 1024 elements.
-    }
-
-    /** Add more space to the ring buffer.
-     *
-     * If for some reason the original allocation of the ring buffer is not
-     * large enough, increase its size.
-     */
-    uint32_t* enlarge(int& read_point) {
-        int oldsize = (int)remaining_buffer.size();
-        int endcount = oldsize - read_point;
-        remaining_buffer.resize(oldsize * 2);
-        auto begin = remaining_buffer.begin();
-        std::copy(begin + read_point, begin + oldsize, begin + read_point + oldsize);
-        read_point += oldsize;
-        return remaining_buffer.data();
-    }
-
-    /** Get bit mask that will wrap the current ring buffer size.
-     */
-    int get_mask() {
-        return (int)remaining_buffer.size() - 1;
+    SearchContext() {
     }
 };
 
@@ -359,23 +383,6 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
 
 }
 
-/** Point representation stored in priority queue.
- *
- * To be able to return a specified number of best ranked points, the search
- * algorithm will maintain a collection of that number of points, which
- * represent the best ranked points found so far.
- *
- * The priority queue is implemented as an array based heap data structure
- * which makes it efficient to identify and replace the point with the highest
- * rank value. The compressed_point struct is the representation of the point
- * inside of this priority queue.
- */
-struct compressed_point {
-    uint32_t rankid;
-    float x;
-    float y;
-};
-
 /** Get the combined rank and id of a compressed_point at a memory location.
  *
  * While the C++ standard library already have an implementation of a priority
@@ -459,27 +466,21 @@ static __forceinline void push_heap(compressed_point* heap, int lastpos, uint32_
     heap[lastpos].y = y;
 }
 
-struct ring_buffer {
+struct process_queue {
+    // TODO: Change into pointers.
     int dequeue_index;
     int enqueue_index;
 
     uint32_t* buffer;
-    int mask;
 
-    ring_buffer(uint32_t* buffer_, int mask_)
-        : dequeue_index(0), enqueue_index(0), buffer(buffer_), mask(mask_)
+    process_queue(uint32_t* buffer_)
+        : dequeue_index(0), enqueue_index(0), buffer(buffer_)
     {
     }
 
     /** Add index of block to process later to the ring buffer. */
     __forceinline void enqueue(SearchContext* sc, uint32_t value) {
-        buffer[enqueue_index] = value;
-        enqueue_index = (enqueue_index + 1) & mask;
-        if (enqueue_index == dequeue_index) {
-            // The initial queue should be sized so that it is unlikely this will ever be called.
-            buffer = sc->enlarge(dequeue_index);
-            mask = sc->get_mask();
-        }
+        buffer[enqueue_index++] = value;        
     }
 
     __forceinline bool contains_values() {
@@ -491,7 +492,7 @@ struct ring_buffer {
     }
 
     __forceinline void pop() {
-        dequeue_index = (dequeue_index + 1) & mask;
+        ++dequeue_index;
     }
 };
 
@@ -501,20 +502,22 @@ extern "C" {
 */
 __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
 {
+    assert(count <= max_requested_points);
+
     // Prepare search bounds for SIMD comparison.
     __m128 lxs = _mm_load1_ps(&rect.lx);
     __m128 hxs = _mm_load1_ps(&rect.hx);
     __m128 lys = _mm_load1_ps(&rect.ly);
     __m128 hys = _mm_load1_ps(&rect.hy);
 
-    ring_buffer queue(sc->remaining_buffer.data(), sc->get_mask());
+    process_queue queue(&sc->process_queue_buffer[0]);
 
     const block* aligned_begin = sc->aligned_begin;
     if (aligned_begin == nullptr) {
         return 0;
     }
 
-    compressed_point* bestheap = (compressed_point*)alloca(count * sizeof(compressed_point));
+    compressed_point* bestheap = sc->heap;
 
     // Fill the priority queue initially with invalid points, which will be
     // replaced as the search commences, and will be filtered out from the

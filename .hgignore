@@ -10,4 +10,7 @@
 \.exp$
 \.ilk$
 \.lib$
+\.orig$
+\.7z$
+^DancingBrutus$
 
