@@ -555,7 +555,6 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         const vectorset& vs = b.vectors[0];
         uint32_t ranklimit = bestheap->rankid >> 8;
         __m128i ranklimitv = _mm_set1_epi32(ranklimit);
-        __m128i ranks_hi = _mm_load_si128((const __m128i*)&vs.rankid[4]);
 
         __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8));
         __m128 betterv_lo = _mm_castsi128_ps(bettervi_lo);
@@ -576,54 +575,14 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         int inboundi = _mm256_movemask_ps(inbound);
         int pushmask = inboundi & betteri;
 
-        if (pushmask) {
-            if (pushmask & 0x0001) {
-                if (bestheap->rankid > vs.rankid[0]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[0], vs.xs[0], vs.ys[0]);
-                }
-            }
-            if (pushmask & 0x0002) {
-                if (bestheap->rankid > vs.rankid[1]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[1], vs.xs[1], vs.ys[1]);
-                }
-            }
-            if (pushmask & 0x0004) {
-                if (bestheap->rankid > vs.rankid[2]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[2], vs.xs[2], vs.ys[2]);
-                }
-            }
-            if (pushmask & 0x0008) {
-                if (bestheap->rankid > vs.rankid[3]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[3], vs.xs[3], vs.ys[3]);
-                }
-            }
-            if (pushmask & 0x0010) {
-                if (bestheap->rankid > vs.rankid[4]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[4], vs.xs[4], vs.ys[4]);
-                }
-            }
-            if (pushmask & 0x0020) {
-                if (bestheap->rankid > vs.rankid[5]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[5], vs.xs[5], vs.ys[5]);
-                }
-            }
-            if (pushmask & 0x0040) {
-                if (bestheap->rankid > vs.rankid[6]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[6], vs.xs[6], vs.ys[6]);
-                }
-            }
-            if (pushmask & 0x0080) {
-                if (bestheap->rankid > vs.rankid[7]) {
-                    pop_heap_raw((char*)(void*)bestheap, count);
-                    push_heap(bestheap, count - 1, vs.rankid[7], vs.xs[7], vs.ys[7]);
-                }
+        unsigned long index;
+        while (_BitScanForward(&index, pushmask)) {
+            // On machines with BMI1 instruction set support, this could be replaced with _blsr_u32.
+            pushmask &= pushmask - 1;
+
+            if (bestheap->rankid > vs.rankid[index]) {
+                pop_heap_raw((char*)(void*)bestheap, count);
+                push_heap(bestheap, count - 1, vs.rankid[index], vs.xs[index], vs.ys[index]);
             }
         }
 
