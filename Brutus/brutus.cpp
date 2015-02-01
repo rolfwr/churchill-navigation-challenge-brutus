@@ -444,10 +444,13 @@ insert:
 }
 
 /** Remove point with the highest rank value from the priority queue.
-*
-* This removes the point at the start of the heap, and frees up a slot
-* for a new point at the end of the heap.
-*/
+ *
+ * This is a specialized version of pop_heap_raw() which assumes the
+ * heap contains the number of elements specified by points_requested.
+ * 
+ * This removes the point at the start of the heap, and frees up a slot
+ * for a new point at the end of the heap.
+ */
 static __forceinline void pop_heap_raw_specialized(char* heap) {
     const int end = (points_requested - 1) * sizeof(compressed_point);
 
@@ -510,7 +513,6 @@ static __forceinline void push_heap(compressed_point* heap, uint32_t newrankid, 
 }
 
 struct process_queue {
-    // TODO: Change into pointers.
     int dequeue_index;
     int enqueue_index;
 
@@ -545,6 +547,9 @@ extern "C" {
 */
 __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rect rect, const int32_t count_, Point* out_points)
 {
+    // Verify specialization assumptions.
+    assert(vectorsets_per_block == 1);
+    assert(points_per_vectorset == 8);
     assert(count_ == points_requested);
 
     // Prepare search bounds for SIMD comparison.
@@ -620,7 +625,8 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
         unsigned long index;
         while (_BitScanForward(&index, pushmask)) {
-            // On machines with BMI1 instruction set support, this could be replaced with _blsr_u32.
+            // On machines with BMI1 instruction set support, this could be
+            // replaced with _blsr_u32().
             pushmask &= pushmask - 1;
 
             if (bestheap->rankid > vs.rankid[index]) {

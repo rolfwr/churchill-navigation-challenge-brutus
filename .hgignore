@@ -13,4 +13,5 @@
 \.orig$
 \.7z$
 ^DancingBrutus$
-
+^SwingingBrutus$
+^log.txt$
