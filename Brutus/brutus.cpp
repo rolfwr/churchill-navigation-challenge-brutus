@@ -82,15 +82,12 @@ const int vectorsets_per_block = 1;
  */
 const int max_block_process = 4096;
 
-/** Maximum number of points requested in a search query.
+/** The number of points a search is expected to return.
  *
- * All code practical limits for how many items they support, be it the maximum
- * value of a given integer type or some other limiting factor. By explicitly
- * specifying what that limit is we can perform optimizations that are not
- * possible when the limit is an untested implict limitation of the
- * implementation.
+ * By specializing on returning a specific number of points allows us to
+ * optimize further.
  */
-const int max_requested_points = 20;
+const int points_requested = 20;
 
 /** The data that will be processed by a single SIMD pass.
  */
@@ -159,7 +156,7 @@ struct SearchContext {
     std::vector<Point> points;
 #endif
 
-    compressed_point heap[max_requested_points];
+    compressed_point heap[points_requested];
 
     /** Allocated memory for storing the blocks of the search tree.
      *
@@ -446,9 +443,55 @@ insert:
     copy_point(heap + i, heap + end);
 }
 
+/** Remove point with the highest rank value from the priority queue.
+*
+* This removes the point at the start of the heap, and frees up a slot
+* for a new point at the end of the heap.
+*/
+static __forceinline void pop_heap_raw_specialized(char* heap) {
+    const int end = (points_requested - 1) * sizeof(compressed_point);
+
+    uint32_t value = getrankid(heap + end);
+    // Find insert point.
+    int i = 0;
+    int c1;
+    while (true) {
+        c1 = i * 2 + sizeof(compressed_point) * 1;
+        int c2 = i * 2 + sizeof(compressed_point) * 2;
+        if (c1 >= end) {
+            goto insert;
+        }
+
+        if (c2 >= end) {
+            goto last;
+        }
+
+        int highc = (getrankid(heap + c2) > getrankid(heap + c1)) ? c2 : c1;
+
+        if (value >= getrankid(heap + highc)) {
+            goto insert;
+        }
+
+        copy_point(heap + i, heap + highc);
+
+        i = highc;
+    }
+
+last:
+    if (value < getrankid(heap + c1)) {
+        copy_point(heap + i, heap + c1);
+        i = c1;
+    }
+
+insert:
+    copy_point(heap + i, heap + end);
+}
+
+
 /** Add point to priority queue which has a free slot at the end of the heap.
  */
-static __forceinline void push_heap(compressed_point* heap, int lastpos, uint32_t newrankid, float x, float y) {
+static __forceinline void push_heap(compressed_point* heap, uint32_t newrankid, float x, float y) {
+    int lastpos = points_requested - 1;
     assert(lastpos != 0);
     do {
         int parent = (lastpos - 1) / 2;
@@ -500,9 +543,9 @@ extern "C" {
 
 /** Release build search API entry-point.
 */
-__declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rect rect, const int32_t count, Point* out_points)
+__declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rect rect, const int32_t count_, Point* out_points)
 {
-    assert(count <= max_requested_points);
+    assert(count_ == points_requested);
 
     // Prepare search bounds for SIMD comparison.
     __m256 lxs = _mm256_set1_ps(rect.lx);
@@ -522,7 +565,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     // Fill the priority queue initially with invalid points, which will be
     // replaced as the search commences, and will be filtered out from the
     // search result if they remain after the search loop completes.
-    for (int i = 0; i < count; ++i) {
+    for (int i = 0; i < points_requested; ++i) {
         bestheap[i].rankid = std::numeric_limits<uint32_t>::max();
     }
  
@@ -581,8 +624,8 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             pushmask &= pushmask - 1;
 
             if (bestheap->rankid > vs.rankid[index]) {
-                pop_heap_raw((char*)(void*)bestheap, count);
-                push_heap(bestheap, count - 1, vs.rankid[index], vs.xs[index], vs.ys[index]);
+                pop_heap_raw_specialized((char*)(void*)bestheap);
+                push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
             }
         }
 
@@ -622,7 +665,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
     assert(!queue.contains_values());
 
-    int left = count;
+    int left = points_requested;
 
     // Remove any invalid points which has been retained from when the priority
     // queue was initialized. If any still exists, that means that the search
