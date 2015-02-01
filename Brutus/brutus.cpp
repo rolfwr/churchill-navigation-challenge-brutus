@@ -63,7 +63,7 @@ const int points_per_vectorset = 8;
  * space by only tranversing down specific branches of the subtree, and
  * performing processing of blocks of memory that have good cache locality.
  */
-const int vectorsets_per_block = 1;
+const int vectorsets_per_block = 2;
 
 /** Maximum number of blocks that needs to be processed during a search.
  *
@@ -126,7 +126,7 @@ struct block {
      * This allows blocks that are store consequatively to all be aligned to
      * cache line width.
      */
-    char pad[8];
+    char pad[40];
 };
 
 /** Point representation stored in priority queue.
@@ -573,6 +573,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     // from there.
     queue.enqueue(sc, 0);
 
+
     // Loop until no more blocks remain in queue.
     while (queue.contains_values()) {
         const block& b = aligned_begin[queue.front()];
@@ -585,47 +586,52 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             const char* memloc = (const char*)(&aligned_begin[queue.front()]);
             _mm_prefetch(memloc, _MM_HINT_T0);
             _mm_prefetch(memloc + 64, _MM_HINT_T0);
+            _mm_prefetch(memloc + 128, _MM_HINT_T0);
+            _mm_prefetch(memloc + 196, _MM_HINT_T0);
         }
 
-        // This is the inner loop of SIMD instructions. This instructions
-        // basically checks each point in a single vectorset for the
-        // following boolean properties:
-        //
-        //   1. Has rank value lower than the highest rank value in the
-        //      priority queue.
-        //   2. Has a coordinate which is inside the search bounds.
+        int betteri = 0;
+        for (int i = 0; i < vectorsets_per_block; ++i) {
+            // This is the inner loop of SIMD instructions. This instructions
+            // basically checks each point in a single vectorset for the
+            // following boolean properties:
+            //
+            //   1. Has rank value lower than the highest rank value in the
+            //      priority queue.
+            //   2. Has a coordinate which is inside the search bounds.
 
-        const vectorset& vs = b.vectors[0];
-        uint32_t ranklimit = bestheap->rankid >> 8;
-        __m128i ranklimitv = _mm_set1_epi32(ranklimit);
+            const vectorset& vs = b.vectors[i];
+            uint32_t ranklimit = bestheap->rankid >> 8;
+            __m128i ranklimitv = _mm_set1_epi32(ranklimit);
 
-        __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8));
-        __m128 betterv_lo = _mm_castsi128_ps(bettervi_lo);
+            __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8));
+            __m128 betterv_lo = _mm_castsi128_ps(bettervi_lo);
 
-        __m128i bettervi_hi = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[4]), 8));
-        __m128 betterv_hi = _mm_castsi128_ps(bettervi_hi);
+            __m128i bettervi_hi = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[4]), 8));
+            __m128 betterv_hi = _mm_castsi128_ps(bettervi_hi);
 
-        __m256 betterv = _mm256_castps128_ps256(betterv_lo);
-        __m256 xs = _mm256_load_ps(&vs.xs[0]);
-        __m256 ys = _mm256_load_ps(&vs.ys[0]);
+            __m256 betterv = _mm256_castps128_ps256(betterv_lo);
+            __m256 xs = _mm256_load_ps(&vs.xs[0]);
+            __m256 ys = _mm256_load_ps(&vs.ys[0]);
 
-        __m256 inbound = _mm256_and_ps(
-            _mm256_and_ps(_mm256_cmp_ps(lxs, xs, _CMP_LE_OQ), _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ)),
-            _mm256_and_ps(_mm256_cmp_ps(lys, ys, _CMP_LE_OQ), _mm256_cmp_ps(ys, hys, _CMP_LE_OQ)));
-        betterv = _mm256_insertf128_ps(betterv, betterv_hi, 1);
+            __m256 inbound = _mm256_and_ps(
+                _mm256_and_ps(_mm256_cmp_ps(lxs, xs, _CMP_LE_OQ), _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ)),
+                _mm256_and_ps(_mm256_cmp_ps(lys, ys, _CMP_LE_OQ), _mm256_cmp_ps(ys, hys, _CMP_LE_OQ)));
+            betterv = _mm256_insertf128_ps(betterv, betterv_hi, 1);
 
-        int betteri = _mm256_movemask_ps(betterv);
-        int inboundi = _mm256_movemask_ps(inbound);
-        int pushmask = inboundi & betteri;
+            betteri |= _mm256_movemask_ps(betterv);
+            int inboundi = _mm256_movemask_ps(inbound);
+            int pushmask = inboundi & betteri;
 
-        unsigned long index;
-        while (_BitScanForward(&index, pushmask)) {
-            // On machines with BMI1 instruction set support, this could be replaced with _blsr_u32.
-            pushmask &= pushmask - 1;
+            unsigned long index;
+            while (_BitScanForward(&index, pushmask)) {
+                // On machines with BMI1 instruction set support, this could be replaced with _blsr_u32.
+                pushmask &= pushmask - 1;
 
-            if (bestheap->rankid > vs.rankid[index]) {
-                pop_heap_raw_specialized((char*)(void*)bestheap);
-                push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
+                if (bestheap->rankid > vs.rankid[index]) {
+                    pop_heap_raw_specialized((char*)(void*)bestheap);
+                    push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
+                }
             }
         }
 
