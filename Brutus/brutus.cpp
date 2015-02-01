@@ -198,6 +198,61 @@ enum quadrant : int {
     hxhy = 3
 };
 
+
+struct valueindex {
+    float value;
+    int index;
+};
+
+
+struct distance {
+    int orderdist;
+    float valuedist;
+};
+
+
+void add_distance_from_center(std::vector<valueindex>& values, std::vector<distance>& distances) {
+
+    std::sort(values.begin(), values.end(), [](const valueindex& a, const valueindex& b) {
+        return a.value < b.value;
+    });
+
+    int count = (int)values.size();
+    int doublemid = count - 1;
+
+    float valuescale = abs(1.0f / (values.front().value - values.back().value));
+    float valuemid = (values.front().value + values.back().value) / 2;
+
+    for (int i = 0; i < count; ++i) {
+        int orderdist = abs(i * 2 - doublemid);
+        float valuedist = abs(values[i].value - valuemid) * valuescale;
+        int index = values[i].index;
+        distances[index].orderdist += orderdist;
+        distances[index].valuedist += valuedist;
+    }
+}
+
+
+int find_centermost_candidate(const std::vector<Point>& candidates) {
+    // Find centermost point in the list of candidate points.
+    auto count = candidates.size();
+    std::vector<valueindex> xsort(count);
+    std::vector<valueindex> ysort(count);
+    for (int i = 0; i < count; ++i) {
+        xsort[i] = valueindex{ candidates[i].x, i };
+        ysort[i] = valueindex{ candidates[i].y, i };
+    }
+    std::vector<distance> distances(count);
+    add_distance_from_center(xsort, distances);
+    add_distance_from_center(ysort, distances);
+
+    auto best = std::min_element(distances.begin(), distances.end(),
+        [](const distance& a, const distance& b) {
+        return a.orderdist != b.orderdist ? a.orderdist < b.orderdist : a.valuedist < b.valuedist;
+    });
+    return (int)std::distance(distances.begin(), best);
+}
+
 /** Create block tree for the given range of rank ordered points.
  *
  * This function is called during the creation phase, and has therefore not
@@ -211,9 +266,11 @@ enum quadrant : int {
  *
  * @returns index of topmost block created.
  */
-uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
+uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end, int depth)
 {
-    const int maxpoints = points_per_vectorset * vectorsets_per_block;
+    bool syntheticpivot = depth < 8;
+
+    const int maxpoints = points_per_vectorset * vectorsets_per_block - (syntheticpivot ? 1 : 0);
     int available = (int)std::distance(begin, end);
     int count;
     if (available > maxpoints) {
@@ -240,49 +297,62 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
     float sepy = 0;
 
     if (remaining) {
-        // Find a suitable pivit point by locating median coordinate values.
-        std::vector<float> xrem;
-        xrem.reserve(remaining);
-        for (int i = 0; i < remaining; ++i) {
-            xrem.push_back(begin[i].x);
-        }
-
-        std::sort(xrem.begin(), xrem.end());
-        int mid = remaining / 2;
-        sepx = xrem[mid];
-
-        std::vector<float> yrem1;
-        yrem1.reserve(remaining / 2 + 1);
-        std::vector<float> yrem2;
-        yrem2.reserve(remaining / 2 + 1);
-
-        for (int i = 0; i < remaining; ++i) {
-            if (begin[i].x < sepx) {
-                yrem1.push_back(begin[i].y);
+        if (!syntheticpivot) {
+            // Move most center point to end of block.
+            int bestindex = find_centermost_candidate(candidates);
+            sepx = candidates[bestindex].x;
+            sepy = candidates[bestindex].y;
+            if (bestindex != count - 1) {
+                std::swap(candidates[bestindex], candidates[count - 1]);
             }
-            else {
-                yrem2.push_back(begin[i].y);
-            }
-        }
-
-        std::sort(yrem1.begin(), yrem1.end());
-        std::sort(yrem2.begin(), yrem2.end());
-
-        if (yrem1.empty()) {
-            sepy = yrem2[yrem2.size() / 2];
-        }
-        else if (yrem2.empty())
-        {
-            sepy = yrem1[yrem1.size() / 2];
         }
         else
         {
-            sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
-        }
 
-        b.sepx = sepx;
-        b.sepy = sepy;
+            // Find a suitable pivit point by locating median coordinate values.
+            std::vector<float> xrem;
+            xrem.reserve(remaining);
+            for (int i = 0; i < remaining; ++i) {
+                xrem.push_back(begin[i].x);
+            }
+
+            std::sort(xrem.begin(), xrem.end());
+            int mid = remaining / 2;
+            sepx = xrem[mid];
+
+            std::vector<float> yrem1;
+            yrem1.reserve(remaining / 2 + 1);
+            std::vector<float> yrem2;
+            yrem2.reserve(remaining / 2 + 1);
+
+            for (int i = 0; i < remaining; ++i) {
+                if (begin[i].x < sepx) {
+                    yrem1.push_back(begin[i].y);
+                }
+                else {
+                    yrem2.push_back(begin[i].y);
+                }
+            }
+
+            std::sort(yrem1.begin(), yrem1.end());
+            std::sort(yrem2.begin(), yrem2.end());
+
+            if (yrem1.empty()) {
+                sepy = yrem2[yrem2.size() / 2];
+            }
+            else if (yrem2.empty())
+            {
+                sepy = yrem1[yrem1.size() / 2];
+            }
+            else
+            {
+                sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
+            }
+        }
     }
+    b.sepx = sepx;
+    b.sepy = sepy;
+
 
     // Make all point values initally inert, so that the search loop will
     // ignore them without the need for specific conditionals to exclude them
@@ -293,6 +363,7 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
 
         for (int i = 0; i < points_per_vectorset; ++i) {
             vs.xs[i] = std::numeric_limits<float>::max();
+            vs.rankid[i] = 0xFFFFFFFF;
         }
     }
 
@@ -303,6 +374,14 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
         vs.xs[i % points_per_vectorset] = p.x;
         vs.ys[i % points_per_vectorset] = p.y;
         vs.rankid[i % points_per_vectorset] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
+    }
+
+    if (syntheticpivot) {
+        // Put the pivot point in as the last point in the block.
+        vectorset& vslast = b.vectors[vectorsets_per_block - 1];
+        vslast.xs[points_per_vectorset - 1] = sepx;
+        vslast.ys[points_per_vectorset - 1] = sepy;
+        vslast.rankid[points_per_vectorset - 1] = 0xffffffff;
     }
 
     // Partition remaining points and enblock them into children.
@@ -322,10 +401,10 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
             return pt.y < sepy;
         });
 
-        uint32_t lxly = enblock(blocks, begin, ysplit1);
-        uint32_t lxhy = enblock(blocks, ysplit1, xsplit);
-        uint32_t hxly = enblock(blocks, xsplit, ysplit2);
-        uint32_t hxhy = enblock(blocks, ysplit2, end);
+        uint32_t lxly = enblock(blocks, begin, ysplit1, depth + 1);
+        uint32_t lxhy = enblock(blocks, ysplit1, xsplit, depth + 1);
+        uint32_t hxly = enblock(blocks, xsplit, ysplit2, depth + 1);
+        uint32_t hxhy = enblock(blocks, ysplit2, end, depth + 1);
 
         // The vector may have been resized, invalidating the previous
         // reference to the block. Therefore, look it up by index after
@@ -345,6 +424,8 @@ extern "C" {
 __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin, const Point* points_end) {
     // Make sure our blocks suited for being cache line aligned.
     assert((sizeof(block) % 64) == 0);
+    assert(vectorsets_per_block == 1);
+    assert(points_per_vectorset == 8);
     auto sc = new SearchContext();
 
     auto count = std::distance(points_begin, points_end);
@@ -355,7 +436,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count]);
+    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count], 0);
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
@@ -587,6 +668,13 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             _mm_prefetch(memloc + 64, _MM_HINT_T0);
         }
 
+#ifndef NDEBUG
+        bool islx = rect.lx < b.sepx;
+        bool isly = rect.ly < b.sepy;
+        bool ishx = rect.hx >= b.sepx;
+        bool ishy = rect.hy >= b.sepy;
+#endif
+
         // This is the inner loop of SIMD instructions. This instructions
         // basically checks each point in a single vectorset for the
         // following boolean properties:
@@ -606,13 +694,18 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         __m128 betterv_hi = _mm_castsi128_ps(bettervi_hi);
 
         __m256 betterv = _mm256_castps128_ps256(betterv_lo);
+        betterv = _mm256_insertf128_ps(betterv, betterv_hi, 1);
         __m256 xs = _mm256_load_ps(&vs.xs[0]);
         __m256 ys = _mm256_load_ps(&vs.ys[0]);
 
+        __m256 lxc = _mm256_cmp_ps(lxs, xs, _CMP_LE_OQ);
+        __m256 hxc = _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ);
+        __m256 lyc = _mm256_cmp_ps(lys, ys, _CMP_LE_OQ);
+        __m256 hyc = _mm256_cmp_ps(ys, hys, _CMP_LE_OQ);
+
         __m256 inbound = _mm256_and_ps(
-            _mm256_and_ps(_mm256_cmp_ps(lxs, xs, _CMP_LE_OQ), _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ)),
-            _mm256_and_ps(_mm256_cmp_ps(lys, ys, _CMP_LE_OQ), _mm256_cmp_ps(ys, hys, _CMP_LE_OQ)));
-        betterv = _mm256_insertf128_ps(betterv, betterv_hi, 1);
+            _mm256_and_ps(lxc, hxc),
+            _mm256_and_ps(lyc, hyc));
 
         int betteri = _mm256_movemask_ps(betterv);
         int inboundi = _mm256_movemask_ps(inbound);
@@ -629,6 +722,8 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             }
         }
 
+#define ALT 1
+
         // If we don't see any rank values that are lower than the rank
         // highest value we've already found, then we know that there is no
         // reason to examine any of the child blocks, since they will only
@@ -637,29 +732,119 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (betteri) {
-            bool islx = rect.lx < b.sepx;
-            bool ishx = rect.hx >= b.sepx;
-            bool isly = rect.ly < b.sepy;
-            bool ishy = rect.hy >= b.sepy;
+            const int lxbit = 0x80;
+            const int hxbit = 0x40;
+            const int lybit = 0x20;
+            const int hybit = 0x10;
+
+            const int lxlybits = lxbit | lybit;
+            const int lxhybits = lxbit | hybit;
+            const int hxlybits = hxbit | lybit;
+            const int hxhybits = hxbit | hybit;
+#ifdef ALT
+            int islx_ = _mm256_castps_si256(lxc).m256i_i32[7];
+            int ishx_ = _mm256_castps_si256(hxc).m256i_i32[7];
+            int isly_ = _mm256_castps_si256(lyc).m256i_i32[7];
+            int ishy_ = _mm256_castps_si256(hyc).m256i_i32[7];
+#ifndef NDEBUG
+            if (b.children[0] != 0 || b.children[1] != 0 || b.children[2] != 0 || b.children[3] != 0) {
+                assert((islx_ && true) == islx);
+                assert((isly_ && true) == isly);
+                assert((ishx_ && true) == ishx);
+                assert((ishy_ && true) == ishy);
+            }
+#endif
+
+            if ((islx_ && isly_) && b.children[lxly]) {
+                queue.enqueue(sc, b.children[lxly]);
+            }
+
+            if ((islx_ && ishy_) && b.children[lxhy]) {
+                queue.enqueue(sc, b.children[lxhy]);
+            }
+
+            if ((ishx_ && isly_) && b.children[hxly]) {
+                queue.enqueue(sc, b.children[hxly]);
+            }
+
+            if ((ishx_ && ishy_) && b.children[hxhy]) {
+                queue.enqueue(sc, b.children[hxhy]);
+            }
+#else
+
+#ifndef NDEBUG
+            int mask_lxc = _mm256_movemask_ps(lxc);
+            int mask_hxc = _mm256_movemask_ps(hxc);
+            int mask_lyc = _mm256_movemask_ps(lyc);
+            int mask_hyc = _mm256_movemask_ps(hyc);
+            assert(((mask_lxc & 0x80) == 0x80) == islx);
+            assert(((mask_hxc & 0x80) == 0x80) == ishx);
+            assert(((mask_lyc & 0x80) == 0x80) == isly);
+            assert(((mask_hyc & 0x80) == 0x80) == ishy);
+#endif
+
+
+            __m256d hxp_lxp = _mm256_castps_pd(_mm256_unpackhi_ps(hxc, lxc));
+            __m256d hyp_lyp = _mm256_castps_pd(_mm256_unpackhi_ps(hyc, lyc));
+
+#ifndef NDEBUG
+            int mask_hxp_lxp = _mm256_movemask_ps(_mm256_castpd_ps(hxp_lxp));
+            int mask_hyp_lyp = _mm256_movemask_ps(_mm256_castpd_ps(hyp_lyp));
+
+            assert(((mask_hxp_lxp & 0x80) == 0x80) == islx);
+            assert(((mask_hxp_lxp & 0x40) == 0x40) == ishx);
+            assert(((mask_hyp_lyp & 0x80) == 0x80) == isly);
+            assert(((mask_hyp_lyp & 0x40) == 0x40) == ishy);
+#endif
+
+            __m256 hyp_lyp_hxp_lxp = _mm256_castpd_ps(_mm256_unpackhi_pd(hyp_lyp, hxp_lxp));
+
+            int pivotmask = _mm256_movemask_ps(hyp_lyp_hxp_lxp);
+
+#ifndef NDEBUG
+            assert(((pivotmask & 0x80) == 0x80) == islx);
+            assert(((pivotmask & 0x40) == 0x40) == ishx);
+            assert(((pivotmask & 0x20) == 0x20) == isly);
+            assert(((pivotmask & 0x10) == 0x10) == ishy);
+#endif
+
+
+#ifndef NDEBUG
+            bool islx_ = (pivotmask & lxbit) == lxbit;
+            bool ishx_ = (pivotmask & hxbit) == hxbit;
+            bool isly_ = (pivotmask & lybit) == lybit;
+            bool ishy_ = (pivotmask & hybit) == hybit;
+
+            assert(islx_ == islx);
+            assert(isly_ == isly);
+            assert(ishx_ == ishx);
+            assert(ishy_ == ishy);
+#endif
+
 
             // Only add the blocks whose quadrant intersect with the search
             // bounds.
 
-            if (islx && isly && b.children[lxly]) {
+            assert((islx && isly) == ((pivotmask & lxlybits) == lxlybits));
+            if (((pivotmask & lxlybits) == lxlybits) && b.children[lxly]) {
                 queue.enqueue(sc, b.children[lxly]);
             }
 
-            if (islx && ishy && b.children[lxhy]) {
+            assert((islx && ishy) == ((pivotmask & lxhybits) == lxhybits));
+            if (((pivotmask & lxhybits) == lxhybits) && b.children[lxhy]) {
                 queue.enqueue(sc, b.children[lxhy]);
             }
 
-            if (ishx && isly && b.children[hxly]) {
+            assert((ishx && isly) == ((pivotmask & hxlybits) == hxlybits));
+            if (((pivotmask & hxlybits) == hxlybits) && b.children[hxly]) {
                 queue.enqueue(sc, b.children[hxly]);
             }
 
-            if (ishx && ishy && b.children[hxhy]) {
+            assert((ishx && ishy) == ((pivotmask & hxhybits) == hxhybits));
+            if (((pivotmask & hxhybits) == hxhybits) && b.children[hxhy]) {
                 queue.enqueue(sc, b.children[hxhy]);
             }
+#endif
         }
     }
 
