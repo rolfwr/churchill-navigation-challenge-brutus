@@ -1,6 +1,6 @@
 #! /bin/sh
 
-name=SwingingBrutus
+name=SwingingBrutusL
 rm -rf $name
 mkdir -p $name/src/Brutus
 cp x64/Release/Brutus.dll $name/$name.dll
