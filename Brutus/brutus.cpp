@@ -144,7 +144,8 @@ struct block {
      * This allows blocks that are store consequatively to all be aligned to
      * cache line width.
      */
-    char pad[8];
+    uint32_t best_child_rank;
+    char pad[4];
 };
 
 /** Point representation stored in priority queue.
@@ -269,6 +270,11 @@ coordinate find_pivot(Point* begin, int remaining) {
     return coordinate{ sepx, sepy };
 }
 
+struct enblock_result {
+    uint32_t block_index;
+    uint32_t bestrankid;
+};
+
 /** Create block tree for the given range of rank ordered points.
  *
  * This function is called during the creation phase, and has therefore not
@@ -282,8 +288,10 @@ coordinate find_pivot(Point* begin, int remaining) {
  *
  * @returns index of topmost block created.
  */
-uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
+enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end)
 {
+    enblock_result result{ 0, 0xFFFFFFFF };
+
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
     int available = (int)std::distance(begin, end);
     int count;
@@ -297,10 +305,13 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
 
     int remaining = available - count;
     if (count == 0) {
-        return 0;
+        return result;
     }
 
-    uint32_t result = (uint32_t)blocks.size();
+    result.bestrankid = begin->rank << 8;
+
+
+    result.block_index = (uint32_t)blocks.size();
     blocks.push_back(block{});
     block& b = blocks.back();
 
@@ -352,19 +363,21 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
             return pt.y < sepy;
         });
 
-        uint32_t lxly = enblock(blocks, begin, ysplit1);
-        uint32_t lxhy = enblock(blocks, ysplit1, xsplit);
-        uint32_t hxly = enblock(blocks, xsplit, ysplit2);
-        uint32_t hxhy = enblock(blocks, ysplit2, end);
+        enblock_result lxly = enblock(blocks, begin, ysplit1);
+        enblock_result lxhy = enblock(blocks, ysplit1, xsplit);
+        enblock_result hxly = enblock(blocks, xsplit, ysplit2);
+        enblock_result hxhy = enblock(blocks, ysplit2, end);
 
         // The vector may have been resized, invalidating the previous
         // reference to the block. Therefore, look it up by index after
         // generating children.
-        block& parent = blocks[result];
-        parent.children[quadrant::lxly] = lxly;
-        parent.children[quadrant::lxhy] = lxhy;
-        parent.children[quadrant::hxly] = hxly;
-        parent.children[quadrant::hxhy] = hxhy;
+        block& parent = blocks[result.block_index];
+        parent.children[quadrant::lxly] = lxly.block_index;
+        parent.children[quadrant::lxhy] = lxhy.block_index;
+        parent.children[quadrant::hxly] = hxly.block_index;
+        parent.children[quadrant::hxhy] = hxhy.block_index;
+
+        parent.best_child_rank = std::min({ lxly.bestrankid, lxhy.bestrankid, hxly.bestrankid, hxhy.bestrankid });
     }
 
     return result;
@@ -385,7 +398,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count]);
+    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count]).block_index;
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
@@ -631,27 +644,15 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         //   2. Has a coordinate which is inside the search bounds.
 
         const vectorset& vs = b.vectors[0];
-        uint32_t ranklimit = bestheap->rankid >> 8;
-        __m128i ranklimitv = _mm_set1_epi32(ranklimit);
-
-        __m128i bettervi_lo = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[0]), 8));
-        __m128 betterv_lo = _mm_castsi128_ps(bettervi_lo);
-
-        __m128i bettervi_hi = _mm_cmpgt_epi32(ranklimitv, _mm_srli_epi32(_mm_load_si128((const __m128i*)&vs.rankid[4]), 8));
-        __m128 betterv_hi = _mm_castsi128_ps(bettervi_hi);
-
-        __m256 betterv = _mm256_castps128_ps256(betterv_lo);
         __m256 xs = _mm256_load_ps(&vs.xs[0]);
         __m256 ys = _mm256_load_ps(&vs.ys[0]);
 
         __m256 inbound = _mm256_and_ps(
             _mm256_and_ps(_mm256_cmp_ps(lxs, xs, _CMP_LE_OQ), _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ)),
             _mm256_and_ps(_mm256_cmp_ps(lys, ys, _CMP_LE_OQ), _mm256_cmp_ps(ys, hys, _CMP_LE_OQ)));
-        betterv = _mm256_insertf128_ps(betterv, betterv_hi, 1);
 
-        int betteri = _mm256_movemask_ps(betterv);
         int inboundi = _mm256_movemask_ps(inbound);
-        int pushmask = inboundi & betteri;
+        int pushmask = inboundi;
 
         unsigned long index;
         while (_BitScanForward(&index, pushmask)) {
@@ -672,7 +673,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         //
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
-        if (betteri) {
+        if (b.best_child_rank < bestheap->rankid) {
             bool islx = rect.lx < b.pivot.x;
             bool ishx = rect.hx >= b.pivot.x;
             bool isly = rect.ly < b.pivot.y;
