@@ -65,6 +65,22 @@ const int points_per_vectorset = 4;
  */
 const int vectorsets_per_block = 2;
 
+/**
+ * To find pivot points that split the data set up pretty evenly, we want to 
+ * find the median. As a naive way of preventing the calculation of the median
+ * from making the loading too slow, we limit calculate an estimated median
+ * based on a limited number of samples.
+ *
+ * This aspect of the loading hasn't been analysed properly yet. There exists
+ * better median calculation algorithms that will give better estimates or
+ * even exact result in less time. It is also unclear whether using medians
+ * for pivot points is the best approach. Using medians assumes that the
+ * distribution function used for point generation is similar to the
+ * distribution function used for search bounds generation. Analysis of the
+ * data sets has not been done yet to verify that this is the case.
+ */
+const int median_sample_count = 100000;
+
 /** The data that will be processed by a single SIMD pass.
  */
 struct vectorset {
@@ -82,6 +98,11 @@ struct vectorset {
     uint32_t rankid[points_per_vectorset];
 };
 
+struct coordinate {
+    float x;
+    float y;
+};
+
 /** A block which makes up a node in a tree of blocks.
  */
 struct block {
@@ -91,11 +112,8 @@ struct block {
     /// Indicies to the blocks for each quadrant.
     uint32_t children[4];
 
-    /// X coordinate value pivot.
-    float sepx;
-
-    /// Y coordinate value pivot.
-    float sepy;
+    /// Pivot coordinate value.
+    coordinate pivot;
 
     /** Padding to bring the size of the block up to a multiple of 64.
      *
@@ -177,6 +195,59 @@ enum quadrant : int {
     hxhy = 3
 };
 
+coordinate find_pivot(Point* begin, int remaining) {
+    int stride = 1;
+    if (remaining > median_sample_count * 2) {
+        stride = remaining / median_sample_count;
+    }
+
+    float sepx = 0;
+    float sepy = 0;
+    // Find a suitable pivit point by locating median coordinate values.
+    std::vector<float> xrem;
+    int samplesize = remaining / stride;
+    xrem.reserve(samplesize + 1);
+    for (int i = 0; i < remaining; i += stride) {
+        xrem.push_back(begin[i].x);
+    }
+
+    std::sort(xrem.begin(), xrem.end());
+    auto mid = xrem.size() / 2;
+    sepx = xrem[mid];
+
+    std::vector<float> yrem1;
+
+    yrem1.reserve(samplesize / 2 + 1);
+    std::vector<float> yrem2;
+    yrem2.reserve(samplesize / 2 + 1);
+
+    for (int i = 0; i < remaining; i += stride) {
+        if (begin[i].x < sepx) {
+            yrem1.push_back(begin[i].y);
+        }
+        else {
+            yrem2.push_back(begin[i].y);
+        }
+    }
+
+    std::sort(yrem1.begin(), yrem1.end());
+    std::sort(yrem2.begin(), yrem2.end());
+
+    if (yrem1.empty()) {
+        sepy = yrem2[yrem2.size() / 2];
+    }
+    else if (yrem2.empty())
+    {
+        sepy = yrem1[yrem1.size() / 2];
+    }
+    else
+    {
+        sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
+    }
+
+    return coordinate{ sepx, sepy };
+}
+
 /** Create block tree for the given range of rank ordered points.
  *
  * This function is called during the creation phase, and has therefore not
@@ -215,52 +286,8 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
 
-    float sepx = 0;
-    float sepy = 0;
-
     if (remaining) {
-        // Find a suitable pivit point by locating median coordinate values.
-        std::vector<float> xrem;
-        xrem.reserve(remaining);
-        for (int i = 0; i < remaining; ++i) {
-            xrem.push_back(begin[i].x);
-        }
-
-        std::sort(xrem.begin(), xrem.end());
-        int mid = remaining / 2;
-        sepx = xrem[mid];
-
-        std::vector<float> yrem1;
-        yrem1.reserve(remaining / 2 + 1);
-        std::vector<float> yrem2;
-        yrem2.reserve(remaining / 2 + 1);
-
-        for (int i = 0; i < remaining; ++i) {
-            if (begin[i].x < sepx) {
-                yrem1.push_back(begin[i].y);
-            }
-            else {
-                yrem2.push_back(begin[i].y);
-            }
-        }
-
-        std::sort(yrem1.begin(), yrem1.end());
-        std::sort(yrem2.begin(), yrem2.end());
-
-        if (yrem1.empty()) {
-            sepy = yrem2[yrem2.size() / 2];
-        }
-        else if (yrem2.empty())
-        {
-            sepy = yrem1[yrem1.size() / 2];
-        }
-        else
-        {
-            sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
-        }
-
-        b.sepx = sepx;
-        b.sepy = sepy;
+        b.pivot = find_pivot(begin, remaining);
     }
 
     // Make all point values initally inert, so that the search loop will
@@ -286,6 +313,9 @@ uint32_t enblock(std::vector<block>& blocks, Point* begin, Point* end)
 
     // Partition remaining points and enblock them into children.
     if (remaining) {
+        float sepx = b.pivot.x;
+        float sepy = b.pivot.y;
+
         // We need to use stable_partition rather than reqular partition,
         // because we need to ensure that each partition is still ordered
         // by rank.
@@ -606,10 +636,10 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (!(_mm_test_all_zeros(seen_better, seen_better))) {
-            bool islx = rect.lx < b.sepx;
-            bool ishx = rect.hx >= b.sepx;
-            bool isly = rect.ly < b.sepy;
-            bool ishy = rect.hy >= b.sepy;
+            bool islx = rect.lx < b.pivot.x;
+            bool ishx = rect.hx >= b.pivot.x;
+            bool isly = rect.ly < b.pivot.y;
+            bool ishy = rect.hy >= b.pivot.y;
 
             // Only add the blocks whose quadrant intersect with the search
             // bounds.
