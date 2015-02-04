@@ -522,24 +522,50 @@ insert:
 
 
 /** Add point to priority queue which has a free slot at the end of the heap.
+ *
+ * Because we know exactly how many elements the priority queue contains we
+ * can write a specialised unrolled loop.
  */
 static __forceinline void push_heap(compressed_point* heap, uint32_t newrankid, float x, float y) {
-    int lastpos = points_requested - 1;
-    assert(lastpos != 0);
-    do {
-        int parent = (lastpos - 1) / 2;
-        if (heap[parent].rankid >= newrankid) {
-            break;
-        }
+    if (heap[9].rankid >= newrankid) {
+        heap[19].rankid = newrankid;
+        heap[19].x = x;
+        heap[19].y = y;
+        return;
+    }
 
-        heap[lastpos] = heap[parent];
-        lastpos = parent;
-    } while (lastpos != 0);
+    heap[19] = heap[9];
 
-    
-    heap[lastpos].rankid = newrankid;
-    heap[lastpos].x = x;
-    heap[lastpos].y = y;
+    if (heap[4].rankid >= newrankid) {
+        heap[9].rankid = newrankid;
+        heap[9].x = x;
+        heap[9].y = y;
+        return;
+    }
+
+    heap[9] = heap[4];
+
+    if (heap[1].rankid >= newrankid) {
+        heap[4].rankid = newrankid;
+        heap[4].x = x;
+        heap[4].y = y;
+        return;
+    }
+
+    heap[4] = heap[1];
+
+    if (heap[0].rankid >= newrankid) {
+        heap[1].rankid = newrankid;
+        heap[1].x = x;
+        heap[1].y = y;
+        return;
+    }
+
+    heap[1] = heap[0];
+
+    heap[0].rankid = newrankid;
+    heap[0].x = x;
+    heap[0].y = y;
 }
 
 struct process_queue {
