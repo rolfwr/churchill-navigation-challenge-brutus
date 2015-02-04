@@ -75,12 +75,15 @@ const int vectorsets_per_block = 1;
  * search rect that spans all the points in one dimension while straddeling the
  * edges pairs of bottommost blocks in the other dimension.
  *
- * That worst case would result in the number of blocks reaching something
- * like:
+ * Given perfect partitioning of the data the worst case would result in the
+ * number of blocks reaching something like:
  *
  *     2^(ceil(ln(10^7/points_per_vectorset/vectorsets_per_block)/ln(4))+2)
+ *
+ * We double this to have a safe margin of error.
+ * 
  */
-const int max_block_process = 4096;
+const int max_block_process = 4096*2;
 
 /** The number of points a search is expected to return.
  *
@@ -633,9 +636,9 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
     // Fill the priority queue initially with invalid points, which will be
     // replaced as the search commences, and will be filtered out from the
-    // search result if they remain after the search loop completes.
-    for (int i = 0; i < points_requested; ++i) {
-        bestheap[i].rankid = std::numeric_limits<uint32_t>::max();
+    // search result if they remain after the search loop completes.    
+    for (compressed_point* ptr = bestheap; ptr < bestheap + points_requested; ++ptr) {
+        ptr->rankid = std::numeric_limits<uint32_t>::max();
     }
  
     // Start on the root block. All other blocks to be searched will be found
