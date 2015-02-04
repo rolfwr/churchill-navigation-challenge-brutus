@@ -105,6 +105,16 @@ const int points_requested = 20;
  */
 const int median_sample_count = 100000;
 
+
+const uint8_t lxbit = 1;
+const uint8_t lybit = 2;
+const uint8_t nhxbit = 4;
+const uint8_t nhybit = 8;
+const uint8_t lxlybit = 16;
+const uint8_t lxhybit = 32;
+const uint8_t hxlybit = 64;
+const uint8_t hxhybit = 128;
+
 /** The data that will be processed by a single SIMD pass.
  */
 struct vectorset {
@@ -372,8 +382,20 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end)
         parent.children[quadrant::hxly] = hxly.block_index;
         parent.children[quadrant::hxhy] = hxhy.block_index;
 
-        parent.best_child_rank = std::min({ lxly.bestrankid, lxhy.bestrankid, hxly.bestrankid, hxhy.bestrankid });
+        uint8_t child_flags = (lxly.block_index ? lxlybit : 0)
+            | (lxhy.block_index ? lxhybit : 0)
+            | (hxly.block_index ? hxlybit : 0)
+            | (hxhy.block_index ? hxhybit : 0);
+        assert((child_flags & 0x0f) == 0);
+
+        parent.best_child_rank = (std::min({ lxly.bestrankid, lxhy.bestrankid, hxly.bestrankid, hxhy.bestrankid }) & 0xffffff00) | child_flags;
     }
+    else
+    {
+        b.best_child_rank = 0xffffff00;
+    }
+
+    assert((blocks[result.block_index].best_child_rank & 0x0f) == 0);
 
     return result;
 }
@@ -590,11 +612,15 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     assert(points_per_vectorset == 8);
     assert(count_ == points_requested);
 
-    // Prepare search bounds for SIMD comparison.
+    // Prepare search bounds for SIMD point vector comparison.
     __m256 lxs = _mm256_set1_ps(rect.lx);
     __m256 hxs = _mm256_set1_ps(rect.hx);
     __m256 lys = _mm256_set1_ps(rect.ly);
     __m256 hys = _mm256_set1_ps(rect.hy);
+
+    // Prepare search bounds for SIMD pivot comparison.
+    __m128 rect_lxlyhxhy = _mm_set_ps(rect.hy, rect.hx, rect.ly, rect.lx);
+    assert(rect_lxlyhxhy.m128_f32[0] == rect.lx);
 
     process_queue queue(&sc->process_queue_buffer[0]);
 
@@ -676,27 +702,35 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (b.best_child_rank < bestheap->rankid) {
-            bool islx = rect.lx < b.pivot.x;
-            bool ishx = rect.hx >= b.pivot.x;
-            bool isly = rect.ly < b.pivot.y;
-            bool ishy = rect.hy >= b.pivot.y;
+            __m128 pivot_xyxy = { 0 };
+            pivot_xyxy = _mm_loadl_pi(pivot_xyxy, (const __m64*)&b.pivot.x);
+            pivot_xyxy = _mm_loadh_pi(pivot_xyxy, (const __m64*)&b.pivot.x);
 
-            // Only add the blocks whose quadrant intersect with the search
-            // bounds.
+            assert(pivot_xyxy.m128_f32[0] == b.pivot.x);
+            assert(pivot_xyxy.m128_f32[1] == b.pivot.y);
+            assert(pivot_xyxy.m128_f32[2] == b.pivot.x);
+            assert(pivot_xyxy.m128_f32[3] == b.pivot.y);
 
-            if (islx && isly && b.children[lxly]) {
+            __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);
+            uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b.best_child_rank);
+
+            if ((mask & (lxbit | lybit | lxlybit)) == (lxbit | lybit | lxlybit)) {
+                assert(b.children[lxly]);
                 queue.enqueue(sc, b.children[lxly]);
             }
 
-            if (islx && ishy && b.children[lxhy]) {
+            if ((mask & (lxbit | nhybit | lxhybit)) == (lxbit |lxhybit)) {
+                assert(b.children[lxhy]);
                 queue.enqueue(sc, b.children[lxhy]);
             }
 
-            if (ishx && isly && b.children[hxly]) {
+            if ((mask & (nhxbit | lybit | hxlybit)) == (lybit | hxlybit)) {
+                assert(b.children[hxly]);
                 queue.enqueue(sc, b.children[hxly]);
             }
 
-            if (ishx && ishy && b.children[hxhy]) {
+            if ((mask & (nhxbit | nhybit | hxhybit)) == hxhybit) {
+                assert(b.children[hxhy]);
                 queue.enqueue(sc, b.children[hxhy]);
             }
         }
