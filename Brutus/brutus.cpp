@@ -133,19 +133,14 @@ struct block {
     /// One vectorset for each SIMD pass that will be performed on the block.
     vectorset vectors[vectorsets_per_block];
 
-    /// Indicies to the blocks for each quadrant.
-    uint32_t children[4];
+    uint32_t best_block_rank;
+    uint32_t best_child_rank;
 
     /// Pivot coordinate value.
     coordinate pivot;
 
-    /** Padding to bring the size of the block up to a multiple of 64.
-     *
-     * This allows blocks that are store consequatively to all be aligned to
-     * cache line width.
-     */
-    uint32_t best_child_rank;
-    char pad[4];
+    /// Indicies to the blocks for each quadrant.
+    uint32_t children[4];
 };
 
 /** Point representation stored in priority queue.
@@ -310,10 +305,10 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end)
 
     result.bestrankid = begin->rank << 8;
 
-
     result.block_index = (uint32_t)blocks.size();
     blocks.push_back(block{});
     block& b = blocks.back();
+    b.best_block_rank = result.bestrankid;
 
     std::vector<Point> candidates(begin, begin + count);
     begin += count;
@@ -626,6 +621,11 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         const block& b = aligned_begin[queue.front()];
         queue.pop();
 
+        if (b.best_block_rank >= bestheap->rankid)
+        {
+            continue;
+        }
+
         if (queue.contains_values()) {
             // Try to prefetch the memory region for the next block to be
             // proccessed into the CPU cache. We do this before starting to
@@ -661,6 +661,8 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             pushmask &= pushmask - 1;
 
             if (bestheap->rankid > vs.rankid[index]) {
+                assert(b.best_block_rank < bestheap->rankid);
+
                 pop_heap_raw_specialized((char*)(void*)bestheap);
                 push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
             }
