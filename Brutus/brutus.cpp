@@ -692,6 +692,11 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
                 pop_heap_raw_specialized((char*)(void*)bestheap);
                 push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
             }
+            else
+            {
+                goto nextinqueue;
+            }
+
         }
 
         // If we don't see any rank values that are lower than the rank
@@ -734,6 +739,9 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
                 queue.enqueue(sc, b.children[hxhy]);
             }
         }
+
+    nextinqueue:
+        ;
     }
 
     assert(!queue.contains_values());
