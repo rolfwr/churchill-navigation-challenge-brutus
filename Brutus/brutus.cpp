@@ -659,6 +659,12 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             const char* memloc = (const char*)(&aligned_begin[queue.front()]);
             _mm_prefetch(memloc, _MM_HINT_T0);
             _mm_prefetch(memloc + 64, _MM_HINT_T0);
+
+            if ((queue.dequeue_index + 1) != queue.enqueue_index) {
+                const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.dequeue_index + 1]]);
+                _mm_prefetch(memloc, _MM_HINT_T0);
+                _mm_prefetch(memloc + 64, _MM_HINT_T0);
+            }
         }
 
         // This is the inner loop of SIMD instructions. This instructions
