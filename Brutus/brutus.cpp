@@ -467,8 +467,8 @@ static __forceinline void copy_point(char* dest, char* src) {
  * This removes the point at the start of the heap, and frees up a slot
  * for a new point at the end of the heap.
  */
-static __forceinline void pop_heap_raw(char* heap, int count) {
-    int end = (count - 1) * sizeof(compressed_point);
+static __forceinline void pop_heap_raw(char* heap, int last_index) {
+    int end = last_index * sizeof(compressed_point);
 
     uint32_t value = getrankid(heap + end);
     // Find insert point.
@@ -761,21 +761,20 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
     // queue was initialized. If any still exists, that means that the search
     // found less points than the number that was requested.
     while (left != 0 && bestheap->rankid == std::numeric_limits<uint32_t>::max()) {
-        pop_heap_raw((char*)(void*)bestheap, left);
-        --left;
+        pop_heap_raw((char*)(void*)bestheap, --left);
     }
 
     // Write the remaining points from the priority queue out to the result
     // buffer. The priority queue outputs the points in the reverse order of what
     // is expected.
     uint32_t result = left;
-    for (int i = ((int)result) - 1; i >= 0; --i) {
-        out_points[i].id = (int8_t)(bestheap->rankid);
-        out_points[i].rank = bestheap->rankid >> 8;
-        out_points[i].x = bestheap->x;
-        out_points[i].y = bestheap->y;
-        pop_heap_raw((char*)(void*)bestheap, left);
+    while (left > 0) {
         --left;
+        out_points[left].id = (int8_t)(bestheap->rankid);
+        out_points[left].rank = bestheap->rankid >> 8;
+        out_points[left].x = bestheap->x;
+        out_points[left].y = bestheap->y;
+        pop_heap_raw((char*)(void*)bestheap, left);
     }
 
     return result;
