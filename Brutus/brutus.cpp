@@ -647,10 +647,10 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
     // Loop until no more blocks remain in queue.
     while (queue.contains_values()) {
-        const block& b = aligned_begin[queue.front()];
+        const block* b = &aligned_begin[queue.front()];
         queue.pop();
 
-        if (b.best_block_rank >= bestheap->rankid)
+        if (b->best_block_rank >= bestheap->rankid)
         {
             continue;
         }
@@ -678,7 +678,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         //      priority queue.
         //   2. Has a coordinate which is inside the search bounds.
 
-        const vectorset& vs = b.vectors[0];
+        const vectorset& vs = b->vectors[0];
         __m256 xs = _mm256_load_ps(&vs.xs[0]);
         __m256 ys = _mm256_load_ps(&vs.ys[0]);
 
@@ -715,10 +715,10 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         //
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
-        if (b.best_child_rank < bestheap->rankid) {
+        if (b->best_child_rank < bestheap->rankid) {
             __m128 pivot_xyxy = { 0 };
-            pivot_xyxy = _mm_loadl_pi(pivot_xyxy, (const __m64*)&b.pivot.x);
-            pivot_xyxy = _mm_loadh_pi(pivot_xyxy, (const __m64*)&b.pivot.x);
+            pivot_xyxy = _mm_loadl_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
+            pivot_xyxy = _mm_loadh_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
 
             assert(pivot_xyxy.m128_f32[0] == b.pivot.x);
             assert(pivot_xyxy.m128_f32[1] == b.pivot.y);
@@ -726,26 +726,38 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             assert(pivot_xyxy.m128_f32[3] == b.pivot.y);
 
             __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);
-            uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b.best_child_rank);
-
+            uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b->best_child_rank);
+            const int mmhint = _MM_HINT_T0;
             if ((mask & (lxbit | lybit | lxlybit)) == (lxbit | lybit | lxlybit)) {
                 assert(b.children[lxly]);
-                queue.enqueue(sc, b.children[lxly]);
+                queue.enqueue(sc, b->children[lxly]);
+                const char* memloc = (const char*)(&aligned_begin[b->children[lxly]]);
+                _mm_prefetch(memloc, mmhint);
+                _mm_prefetch(memloc + 64, mmhint);
             }
 
             if ((mask & (lxbit | nhybit | lxhybit)) == (lxbit |lxhybit)) {
                 assert(b.children[lxhy]);
-                queue.enqueue(sc, b.children[lxhy]);
+                queue.enqueue(sc, b->children[lxhy]);
+                const char* memloc = (const char*)(&aligned_begin[b->children[lxhy]]);
+                _mm_prefetch(memloc, mmhint);
+                _mm_prefetch(memloc + 64, mmhint);
             }
 
             if ((mask & (nhxbit | lybit | hxlybit)) == (lybit | hxlybit)) {
                 assert(b.children[hxly]);
-                queue.enqueue(sc, b.children[hxly]);
+                queue.enqueue(sc, b->children[hxly]);
+                const char* memloc = (const char*)(&aligned_begin[b->children[hxly]]);
+                _mm_prefetch(memloc, mmhint);
+                _mm_prefetch(memloc + 64, mmhint);
             }
 
             if ((mask & (nhxbit | nhybit | hxhybit)) == hxhybit) {
                 assert(b.children[hxhy]);
-                queue.enqueue(sc, b.children[hxhy]);
+                queue.enqueue(sc, b->children[hxhy]);
+                const char* memloc = (const char*)(&aligned_begin[b->children[hxhy]]);
+                _mm_prefetch(memloc, mmhint);
+                _mm_prefetch(memloc + 64, mmhint);
             }
         }
 
