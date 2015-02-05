@@ -65,6 +65,13 @@ const int points_per_vectorset = 8;
  */
 const int vectorsets_per_block = 1;
 
+/** L1 prefetch block count
+ *
+ * This is a tuneable parameter. On my machine values in the range between
+ * 30 and 50 gives the results.
+ */
+const int l1_prefetch_block_count = 40;
+
 /** Maximum number of blocks that needs to be processed during a search.
  *
  * There is an upper limit to the number of blocks that needs to be processed.
@@ -578,11 +585,12 @@ static __forceinline void push_heap(compressed_point* heap, uint32_t newrankid, 
 struct process_queue {
     int dequeue_index;
     int enqueue_index;
+    int prefetch_index;
 
     uint32_t* buffer;
 
     process_queue(uint32_t* buffer_)
-        : dequeue_index(0), enqueue_index(0), buffer(buffer_)
+        : dequeue_index(0), enqueue_index(0), prefetch_index(1), buffer(buffer_)
     {
     }
 
@@ -655,18 +663,17 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             continue;
         }
 
-        if (queue.contains_values()) {
-            // Try to prefetch the memory region for the next block to be
-            // proccessed into the CPU cache. We do this before starting to
-            // process the current block, so that the fetch occur concurrently.
-            const char* memloc = (const char*)(&aligned_begin[queue.front()]);
-            _mm_prefetch(memloc, _MM_HINT_T0);
-            _mm_prefetch(memloc + 64, _MM_HINT_T0);
-
-            if ((queue.dequeue_index + 1) != queue.enqueue_index) {
-                const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.dequeue_index + 1]]);
+        if ((queue.prefetch_index - queue.dequeue_index) < l1_prefetch_block_count) {
+            if (queue.prefetch_index < queue.enqueue_index) {
+                const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.prefetch_index++]]);
                 _mm_prefetch(memloc, _MM_HINT_T0);
                 _mm_prefetch(memloc + 64, _MM_HINT_T0);
+
+                if (queue.prefetch_index < queue.enqueue_index) {
+                    const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.prefetch_index++]]);
+                    _mm_prefetch(memloc, _MM_HINT_T0);
+                    _mm_prefetch(memloc + 64, _MM_HINT_T0);
+                }
             }
         }
 
@@ -727,37 +734,24 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
             __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);
             uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b->best_child_rank);
-            const int mmhint = _MM_HINT_T0;
             if ((mask & (lxbit | lybit | lxlybit)) == (lxbit | lybit | lxlybit)) {
                 assert(b.children[lxly]);
                 queue.enqueue(sc, b->children[lxly]);
-                const char* memloc = (const char*)(&aligned_begin[b->children[lxly]]);
-                _mm_prefetch(memloc, mmhint);
-                _mm_prefetch(memloc + 64, mmhint);
             }
 
             if ((mask & (lxbit | nhybit | lxhybit)) == (lxbit |lxhybit)) {
                 assert(b.children[lxhy]);
                 queue.enqueue(sc, b->children[lxhy]);
-                const char* memloc = (const char*)(&aligned_begin[b->children[lxhy]]);
-                _mm_prefetch(memloc, mmhint);
-                _mm_prefetch(memloc + 64, mmhint);
             }
 
             if ((mask & (nhxbit | lybit | hxlybit)) == (lybit | hxlybit)) {
                 assert(b.children[hxly]);
                 queue.enqueue(sc, b->children[hxly]);
-                const char* memloc = (const char*)(&aligned_begin[b->children[hxly]]);
-                _mm_prefetch(memloc, mmhint);
-                _mm_prefetch(memloc + 64, mmhint);
             }
 
             if ((mask & (nhxbit | nhybit | hxhybit)) == hxhybit) {
                 assert(b.children[hxhy]);
                 queue.enqueue(sc, b->children[hxhy]);
-                const char* memloc = (const char*)(&aligned_begin[b->children[hxhy]]);
-                _mm_prefetch(memloc, mmhint);
-                _mm_prefetch(memloc + 64, mmhint);
             }
         }
 
