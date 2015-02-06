@@ -147,6 +147,8 @@ struct coordinate {
     float y;
 };
 
+const uint8_t negmask = (lxbit | lybit | lxlybit | lxhybit | hxlybit | hxhybit);
+
 /** A block which makes up a node in a tree of blocks.
  */
 struct block {
@@ -437,7 +439,7 @@ enblock_result linear_enblock(std::vector<block>& blocks, Point* begin, Point* e
 
         // Partition remaining points and enblock them into children.
         if (!remaining) {
-            b.best_child_rank = 0xffffff00;
+            b.best_child_rank = 0xffffff00 | negmask;
         } else { 
             float sepx = std::numeric_limits<float>::max();
             float sepy = std::numeric_limits<float>::max();;
@@ -446,7 +448,7 @@ enblock_result linear_enblock(std::vector<block>& blocks, Point* begin, Point* e
             b.children[quadrant::lxhy] = 0;
             b.children[quadrant::hxly] = 0;
             b.children[quadrant::hxhy] = 0;
-            b.best_child_rank = begin->rank << 8 | lxlybit;
+            b.best_child_rank = begin->rank << 8 | (lxlybit ^ negmask);
         }
 
         if (first) {
@@ -575,14 +577,14 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int
             | (hxhy.block_index ? hxhybit : 0);
         assert((child_flags & 0x0f) == 0);
 
-        parent.best_child_rank = (std::min({ lxly.bestrankid, lxhy.bestrankid, hxly.bestrankid, hxhy.bestrankid }) & 0xffffff00) | child_flags;
+        parent.best_child_rank = (std::min({ lxly.bestrankid, lxhy.bestrankid, hxly.bestrankid, hxhy.bestrankid }) & 0xffffff00) | (child_flags ^ negmask);
     }
     else
     {
-        b.best_child_rank = 0xffffff00;
+        b.best_child_rank = 0xffffff00 | negmask;
     }
 
-    assert((blocks[result.block_index].best_child_rank & 0x0f) == 0);
+    assert(((blocks[result.block_index].best_child_rank ^ negmask) & 0x0f) == 0);
 
     return result;
 }
@@ -904,24 +906,24 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             pivot_xyxy = _mm_loadl_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
             pivot_xyxy = _mm_loadh_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
 
-            __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);
-            uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b->best_child_rank);
-            if ((mask & (lxbit | lybit | lxlybit)) == (lxbit | lybit | lxlybit)) {
+            __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);            
+            uint8_t mask = (((uint8_t)_mm_movemask_ps(lessthan)) ^ ((uint8_t)b->best_child_rank));
+            if ((mask & (lxbit | lybit | lxlybit)) == 0) {
                 assert(b->children[lxly]);
                 queue.enqueue(sc, b->children[lxly]);
             }
 
-            if ((mask & (lxbit | nhybit | lxhybit)) == (lxbit |lxhybit)) {
+            if ((mask & (lxbit | nhybit | lxhybit)) == 0) {
                 assert(b->children[lxhy]);
                 queue.enqueue(sc, b->children[lxhy]);
             }
 
-            if ((mask & (nhxbit | lybit | hxlybit)) == (lybit | hxlybit)) {
+            if ((mask & (nhxbit | lybit | hxlybit)) == 0) {
                 assert(b->children[hxly]);
                 queue.enqueue(sc, b->children[hxly]);
             }
 
-            if ((mask & (nhxbit | nhybit | hxhybit)) == hxhybit) {
+            if ((mask & (nhxbit | nhybit | hxhybit)) == 0) {
                 assert(b->children[hxhy]);
                 queue.enqueue(sc, b->children[hxhy]);
             }
