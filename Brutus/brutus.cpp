@@ -113,7 +113,7 @@ const int points_requested = 20;
  * distribution function used for search bounds generation. Analysis of the
  * data sets has not been done yet to verify that this is the case.
  */
-const int median_sample_count = 100000;
+const int median_sample_count = 10000000;
 
 
 const uint8_t lxbit = 1;
@@ -232,54 +232,142 @@ enum quadrant : int {
     hxhy = 3
 };
 
+float quick_select(float* begin, float* end, ptrdiff_t n) {
+    float pivotvalue = std::numeric_limits<float>::max();
+    while (true) {
+        float* pivot = begin + std::rand() % std::distance(begin, end);
+        if (*pivot == pivotvalue) {
+            if (std::rand() & 1) {
+                return _nextafterf(pivotvalue, std::numeric_limits<float>::max());
+            }
+            return _nextafterf(pivotvalue, std::numeric_limits<float>::lowest());
+        }
+        pivotvalue = *pivot;
+
+        std::iter_swap(pivot, end - 1);
+        pivot = std::partition(begin, end - 1, [=](float v) {
+            return v < pivotvalue;
+        });
+        std::iter_swap(end - 1, pivot);
+        if (n == pivot - begin) {
+            return pivotvalue;
+        }
+        else if (n < pivot - begin) {
+            end = pivot;
+        }
+        else {
+            n -= pivot + 1 - begin;
+            begin = pivot + 1;
+        }
+    }
+}
+
+float quick_median(std::vector<float>& values) {
+    return quick_select(&values.data()[0], &values.data()[0] + values.size(), values.size() / 2);
+}
+
 coordinate find_pivot(Point* begin, int remaining) {
+    /*
+     * TODO: Improve this code.
+     *
+     * Use a better median search algorithm.
+     * 
+     * Also, the median strategy works poorly when remaining sequence consists
+     * of mainly duplicate values.
+     */
+
     int stride = 1;
     if (remaining > median_sample_count * 2) {
         stride = remaining / median_sample_count;
     }
 
-    float sepx = 0;
-    float sepy = 0;
     // Find a suitable pivit point by locating median coordinate values.
-    std::vector<float> xrem;
     int samplesize = remaining / stride;
+    std::vector<float> xrem;
     xrem.reserve(samplesize + 1);
+    std::vector<float> yrem;
+    yrem.reserve(samplesize + 1);
+
     for (int i = 0; i < remaining; i += stride) {
         xrem.push_back(begin[i].x);
+        yrem.push_back(begin[i].y);
     }
 
-    std::sort(xrem.begin(), xrem.end());
-    auto mid = xrem.size() / 2;
-    sepx = xrem[mid];
+    float sepx = quick_median(xrem);
+    float sepy = quick_median(yrem);
 
+    int clxly = 0;
+    int clxhy = 0;
+    int chxly = 0;
+    int chxhy = 0;
+
+    std::vector<float> xrem1;
+    xrem1.reserve(samplesize + 1);
+    std::vector<float> xrem2;
+    xrem2.reserve(samplesize + 1);
     std::vector<float> yrem1;
-
-    yrem1.reserve(samplesize / 2 + 1);
+    yrem1.reserve(samplesize + 1);
     std::vector<float> yrem2;
-    yrem2.reserve(samplesize / 2 + 1);
+    yrem2.reserve(samplesize + 1);
 
+    // Test which dimension is in most need of readjustment.
     for (int i = 0; i < remaining; i += stride) {
         if (begin[i].x < sepx) {
             yrem1.push_back(begin[i].y);
+            if (begin[i].y < sepy) {
+                xrem1.push_back(begin[i].x);
+                ++clxly;
+            }
+            else
+            {
+                xrem2.push_back(begin[i].x);
+                ++clxhy;
+            }
         }
-        else {
+        else
+        {
             yrem2.push_back(begin[i].y);
+            if (begin[i].y < sepy) {
+                xrem1.push_back(begin[i].x);
+                ++chxly;
+            }
+            else
+            {
+                xrem2.push_back(begin[i].x);
+                ++chxhy;
+            }
         }
     }
 
-    std::sort(yrem1.begin(), yrem1.end());
-    std::sort(yrem2.begin(), yrem2.end());
+    int xdiff = abs(clxly - chxly) + abs(clxhy - chxhy);
+    int ydiff = abs(clxly - clxhy) + abs(chxly - chxhy);
 
-    if (yrem1.empty()) {
-        sepy = yrem2[yrem2.size() / 2];
-    }
-    else if (yrem2.empty())
-    {
-        sepy = yrem1[yrem1.size() / 2];
+    if (xdiff < ydiff) {
+        if (yrem1.empty()) {
+            sepy = quick_median(yrem2);
+        }
+        else if (yrem2.empty())
+        {
+            sepy = quick_median(yrem1);
+        }
+        else
+        {
+            sepy = (quick_median(yrem1) * yrem1.size() + quick_median(yrem2) * yrem2.size()) / (yrem1.size() + yrem2.size());
+        }
     }
     else
     {
-        sepy = (yrem1[yrem1.size() / 2] + yrem2[yrem2.size() / 2]) / 2;
+        if (xrem1.empty()) {
+            sepx = quick_median(xrem2);
+        }
+        else if (xrem2.empty())
+        {
+            sepx = quick_median(xrem1);
+        }
+        else
+        {
+            sepx = (quick_median(xrem1) * xrem1.size() + quick_median(xrem2) * xrem2.size()) / (xrem1.size() + xrem2.size());
+        }
     }
 
     return coordinate{ sepx, sepy };
@@ -289,6 +377,91 @@ struct enblock_result {
     uint32_t block_index;
     uint32_t bestrankid;
 };
+
+/**
+ * Output the remaining points in a linear chain of blocks. This is needed to
+ * avoid stack overflow for specific seeds such as 
+ * FC9446C2-F61C2892-FC9446C2-E6CF6E44-D75CA912 which contain a large number of
+ * duplicate coordinates.
+ *
+ * These duplicate coordinates makes it difficult to balance the tree around
+ * pivots. This results in deep trees.
+ */
+enblock_result linear_enblock(std::vector<block>& blocks, Point* begin, Point* end)
+{
+    enblock_result top_result{ 0, 0xFFFFFFFF };
+    bool first = true;
+    while (true) {
+        enblock_result result{ 0, 0xFFFFFFFF };
+        const int maxpoints = points_per_vectorset * vectorsets_per_block;
+        int available = (int)std::distance(begin, end);
+        int count;
+        if (available > maxpoints) {
+            count = maxpoints;
+        }
+        else
+        {
+            count = available;
+        }
+
+        int remaining = available - count;
+        if (count == 0) {
+            break;
+        }
+
+        result.bestrankid = begin->rank << 8;
+
+        result.block_index = (uint32_t)blocks.size();
+        blocks.push_back(block{});
+        block& b = blocks.back();
+        b.best_block_rank = result.bestrankid;
+
+        std::vector<Point> candidates(begin, begin + count);
+        begin += count;
+
+        for (int vi = 0; vi < vectorsets_per_block; ++vi) {
+            vectorset& vs = b.vectors[vi];
+            for (int i = 0; i < points_per_vectorset; ++i) {
+                vs.xs[i] = std::numeric_limits<float>::max();
+            }
+        }
+
+        // Fill in the vector sets with available points.
+        for (int i = 0; i < candidates.size(); ++i) {
+            Point& p = candidates[i];
+            vectorset& vs = b.vectors[i / points_per_vectorset];
+            vs.xs[i % points_per_vectorset] = p.x;
+            vs.ys[i % points_per_vectorset] = p.y;
+            vs.rankid[i % points_per_vectorset] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
+        }
+
+        // Partition remaining points and enblock them into children.
+        if (!remaining) {
+            b.best_child_rank = 0xffffff00;
+        } else { 
+            float sepx = std::numeric_limits<float>::max();
+            float sepy = std::numeric_limits<float>::max();;
+
+            b.children[quadrant::lxly] = (uint32_t)blocks.size();
+            b.children[quadrant::lxhy] = 0;
+            b.children[quadrant::hxly] = 0;
+            b.children[quadrant::hxhy] = 0;
+            b.best_child_rank = begin->rank << 8 | lxlybit;
+        }
+
+        if (first) {
+            top_result = result;
+            first = false;
+        }
+
+        if (!remaining) {
+            break;
+        }
+    }
+
+    return top_result;
+}
+
 
 /** Create block tree for the given range of rank ordered points.
  *
@@ -303,8 +476,12 @@ struct enblock_result {
  *
  * @returns index of topmost block created.
  */
-enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end)
+enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int depth)
 {
+    if (depth > 200) {
+        return linear_enblock(blocks, begin, end);
+    }
+
     enblock_result result{ 0, 0xFFFFFFFF };
 
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
@@ -378,10 +555,10 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end)
             return pt.y < sepy;
         });
 
-        enblock_result lxly = enblock(blocks, begin, ysplit1);
-        enblock_result lxhy = enblock(blocks, ysplit1, xsplit);
-        enblock_result hxly = enblock(blocks, xsplit, ysplit2);
-        enblock_result hxhy = enblock(blocks, ysplit2, end);
+        enblock_result lxly = enblock(blocks, begin, ysplit1, depth + 1);
+        enblock_result lxhy = enblock(blocks, ysplit1, xsplit, depth + 1);
+        enblock_result hxly = enblock(blocks, xsplit, ysplit2, depth + 1);
+        enblock_result hxhy = enblock(blocks, ysplit2, end, depth + 1);
 
         // The vector may have been resized, invalidating the previous
         // reference to the block. Therefore, look it up by index after
@@ -425,7 +602,46 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count]).block_index;
+    // Group points that have the same coordinate together, while keeping the
+    // each group ordered by rank.
+    std::stable_sort(points.begin(), points.end(), [](const Point& a, const Point& b) {
+        return (a.x == b.x) ? (a.y < b.y) : (a.x < b.x);
+    });
+
+    auto inptr = points.begin();
+    auto outptr = inptr;
+    auto end = points.end();
+
+    float lastx = std::numeric_limits<float>::max();
+    float lasty = std::numeric_limits<float>::max();
+    int streak = 0;
+    while (inptr != end) {
+        if (inptr->x == lastx && inptr->y == lasty) {
+            if (streak < points_requested) {
+                *outptr++ = *inptr;
+            }
+
+            ++streak;
+        }
+        else
+        {
+            *outptr++ = *inptr;
+            lastx = inptr->x;
+            lasty = inptr->y;
+            streak = 0;
+        }
+
+        ++inptr;
+    }
+
+    points.resize(outptr - points.begin());
+
+    // Put points back into plain rank order.
+    std::sort(points.begin(), points.end(), [](const Point& a, const Point& b) {
+        return a.rank < b.rank;
+    });
+
+    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count], 0).block_index;
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
@@ -703,7 +919,7 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             pushmask &= pushmask - 1;
 
             if (bestheap->rankid > vs.rankid[index]) {
-                assert(b.best_block_rank < bestheap->rankid);
+                assert(b->best_block_rank < bestheap->rankid);
 
                 pop_heap_raw_specialized((char*)(void*)bestheap);
                 push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
@@ -727,30 +943,30 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             pivot_xyxy = _mm_loadl_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
             pivot_xyxy = _mm_loadh_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
 
-            assert(pivot_xyxy.m128_f32[0] == b.pivot.x);
-            assert(pivot_xyxy.m128_f32[1] == b.pivot.y);
-            assert(pivot_xyxy.m128_f32[2] == b.pivot.x);
-            assert(pivot_xyxy.m128_f32[3] == b.pivot.y);
+            assert(pivot_xyxy.m128_f32[0] == b->pivot.x);
+            assert(pivot_xyxy.m128_f32[1] == b->pivot.y);
+            assert(pivot_xyxy.m128_f32[2] == b->pivot.x);
+            assert(pivot_xyxy.m128_f32[3] == b->pivot.y);
 
             __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);
             uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b->best_child_rank);
             if ((mask & (lxbit | lybit | lxlybit)) == (lxbit | lybit | lxlybit)) {
-                assert(b.children[lxly]);
+                assert(b->children[lxly]);
                 queue.enqueue(sc, b->children[lxly]);
             }
 
             if ((mask & (lxbit | nhybit | lxhybit)) == (lxbit |lxhybit)) {
-                assert(b.children[lxhy]);
+                assert(b->children[lxhy]);
                 queue.enqueue(sc, b->children[lxhy]);
             }
 
             if ((mask & (nhxbit | lybit | hxlybit)) == (lybit | hxlybit)) {
-                assert(b.children[hxly]);
+                assert(b->children[hxly]);
                 queue.enqueue(sc, b->children[hxly]);
             }
 
             if ((mask & (nhxbit | nhybit | hxhybit)) == hxhybit) {
-                assert(b.children[hxhy]);
+                assert(b->children[hxhy]);
                 queue.enqueue(sc, b->children[hxhy]);
             }
         }
