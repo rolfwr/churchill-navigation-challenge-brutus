@@ -14,4 +14,7 @@
 \.7z$
 ^DancingBrutus$
 ^SwingingBrutus$
+^DancingBrutusL$
+^SwingingBrutusL$
+^WaltzingBrutus$
 ^log.txt$

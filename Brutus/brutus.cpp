@@ -602,45 +602,6 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    // Group points that have the same coordinate together, while keeping the
-    // each group ordered by rank.
-    std::stable_sort(points.begin(), points.end(), [](const Point& a, const Point& b) {
-        return (a.x == b.x) ? (a.y < b.y) : (a.x < b.x);
-    });
-
-    auto inptr = points.begin();
-    auto outptr = inptr;
-    auto end = points.end();
-
-    float lastx = std::numeric_limits<float>::max();
-    float lasty = std::numeric_limits<float>::max();
-    int streak = 0;
-    while (inptr != end) {
-        if (inptr->x == lastx && inptr->y == lasty) {
-            if (streak < points_requested) {
-                *outptr++ = *inptr;
-            }
-
-            ++streak;
-        }
-        else
-        {
-            *outptr++ = *inptr;
-            lastx = inptr->x;
-            lasty = inptr->y;
-            streak = 0;
-        }
-
-        ++inptr;
-    }
-
-    points.resize(outptr - points.begin());
-
-    // Put points back into plain rank order.
-    std::sort(points.begin(), points.end(), [](const Point& a, const Point& b) {
-        return a.rank < b.rank;
-    });
-
     int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count], 0).block_index;
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
@@ -942,11 +903,6 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             __m128 pivot_xyxy = { 0 };
             pivot_xyxy = _mm_loadl_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
             pivot_xyxy = _mm_loadh_pi(pivot_xyxy, (const __m64*)&b->pivot.x);
-
-            assert(pivot_xyxy.m128_f32[0] == b->pivot.x);
-            assert(pivot_xyxy.m128_f32[1] == b->pivot.y);
-            assert(pivot_xyxy.m128_f32[2] == b->pivot.x);
-            assert(pivot_xyxy.m128_f32[3] == b->pivot.y);
 
             __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, pivot_xyxy);
             uint8_t mask = ((uint8_t)_mm_movemask_ps(lessthan)) | ((uint8_t)b->best_child_rank);
