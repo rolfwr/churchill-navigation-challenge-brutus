@@ -845,20 +845,6 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             continue;
         }
 
-        if ((queue.prefetch_index - queue.dequeue_index) < l1_prefetch_block_count) {
-            if (queue.prefetch_index < queue.enqueue_index) {
-                const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.prefetch_index++]]);
-                _mm_prefetch(memloc, _MM_HINT_T0);
-                _mm_prefetch(memloc + 64, _MM_HINT_T0);
-
-                if (queue.prefetch_index < queue.enqueue_index) {
-                    const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.prefetch_index++]]);
-                    _mm_prefetch(memloc, _MM_HINT_T0);
-                    _mm_prefetch(memloc + 64, _MM_HINT_T0);
-                }
-            }
-        }
-
         // This is the inner loop of SIMD instructions. This instructions
         // basically checks each point in a single vectorset for the
         // following boolean properties:
@@ -875,8 +861,21 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             _mm256_and_ps(_mm256_cmp_ps(lxs, xs, _CMP_LE_OQ), _mm256_cmp_ps(xs, hxs, _CMP_LE_OQ)),
             _mm256_and_ps(_mm256_cmp_ps(lys, ys, _CMP_LE_OQ), _mm256_cmp_ps(ys, hys, _CMP_LE_OQ)));
 
-        int inboundi = _mm256_movemask_ps(inbound);
-        int pushmask = inboundi;
+        int pushmask = _mm256_movemask_ps(inbound);
+
+        if ((queue.prefetch_index - queue.dequeue_index) < l1_prefetch_block_count) {
+            if (queue.prefetch_index < queue.enqueue_index) {
+                const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.prefetch_index++]]);
+                _mm_prefetch(memloc, _MM_HINT_T0);
+                _mm_prefetch(memloc + 64, _MM_HINT_T0);
+
+                if (queue.prefetch_index < queue.enqueue_index) {
+                    const char* memloc = (const char*)(&aligned_begin[queue.buffer[queue.prefetch_index++]]);
+                    _mm_prefetch(memloc, _MM_HINT_T0);
+                    _mm_prefetch(memloc + 64, _MM_HINT_T0);
+                }
+            }
+        }
 
         unsigned long index;
         while (_BitScanForward(&index, pushmask)) {
