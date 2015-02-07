@@ -27,7 +27,8 @@
 #include <iostream>
 #include <limits>
 #include "immintrin.h"
-
+#define NOMINMAX
+#include <Windows.h>
 #pragma intrinsic(memcpy)
 
 #ifdef NDEBUG
@@ -115,7 +116,6 @@ const int points_requested = 20;
  */
 const int median_sample_count = 10000000;
 
-
 const uint8_t lxbit = 1;
 const uint8_t lybit = 2;
 const uint8_t nhxbit = 4;
@@ -165,6 +165,8 @@ struct block {
     uint32_t children[4];
 };
 
+const block* aligned_begin = (block*)(void*)0x000004b1d0000000;
+
 /** Point representation stored in priority queue.
  *
  * To be able to return a specified number of best ranked points, the search
@@ -193,22 +195,6 @@ struct SearchContext {
 #endif
 
     compressed_point heap[points_requested];
-
-    /** Allocated memory for storing the blocks of the search tree.
-     *
-     * During creation of the tree, we will use the memory of the vector as
-     * intended, but before finalizing the search context, we will shift the
-     * blocks to be cache line aligned. The memory allocated by vector will
-     * still be used after doing this, even tough element access through the
-     * vector API no longer makes sense.
-     */
-    std::vector<block> blocks;
-
-    /** Pointer to the first tree block after alignment shift.
-     *
-     * If the tree has no blocks, i.e. there are no points, this is a nullptr.
-     */
-    block* aligned_begin;
 
     /** Queue of unprocessed blocks.
      *
@@ -604,18 +590,27 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
         return a.rank < b.rank;
     });
 
-    int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count], 0).block_index;
+    std::vector<block> blocks;
+
+    int bindex = enblock(blocks, &points.data()[0], &points.data()[count], 0).block_index;
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
-    size_t blockcount = sc->blocks.size();
-    sc->blocks.push_back(block{}); // alignment padding;
 
-    size_t begin = (size_t)(&sc->blocks.data()[0]);
-    size_t aligned = (begin + 63) & ~((size_t)63);
+    if (blocks.size() == 0) {
+        // Create an empty block.
+        block empty;
+        empty.best_block_rank = std::numeric_limits<uint32_t>::max();
+        blocks.push_back(empty);
+    }
+    size_t blockcount = blocks.size();
+    size_t bytecount = blockcount * sizeof(block);
+    LPVOID addr = VirtualAlloc((LPVOID)aligned_begin, bytecount, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    assert(addr == (LPVOID)aligned_begin);
 
-    std::memmove((void*)aligned, (void*)begin, blockcount * sizeof(block));
-    sc->aligned_begin = blockcount ? (block*)aligned : nullptr;
+    size_t begin = (size_t)(&blocks.data()[0]);
+
+    std::memmove((void*)aligned_begin, (void*)begin, bytecount);
 
 #ifndef NDEBUG
     sc->points = points;
@@ -814,11 +809,6 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
     process_queue queue(&sc->process_queue_buffer[0]);
 
-    const block* aligned_begin = sc->aligned_begin;
-    if (aligned_begin == nullptr) {
-        return 0;
-    }
-
     compressed_point* bestheap = sc->heap;
 
     // Fill the priority queue initially with invalid points, which will be
@@ -965,6 +955,9 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 /** Free memory used by search context.
 */
 __declspec(dllexport) SearchContext* __stdcall destroy(SearchContext* sc) {
+
+    BOOL ok = VirtualFree((LPVOID)aligned_begin, 0, MEM_RELEASE);
+    assert(ok);
     delete sc;
     return nullptr;
 };
