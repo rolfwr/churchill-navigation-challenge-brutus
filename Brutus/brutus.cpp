@@ -26,7 +26,12 @@
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include <atomic>
+#include <thread>
 #include "immintrin.h"
+
+#define NOMINMAX
+#include <Windows.h>
 
 #pragma intrinsic(memcpy)
 
@@ -210,6 +215,7 @@ struct SearchContext {
      */
     block* aligned_begin;
 
+
     /** Queue of unprocessed blocks.
      *
      * During search, applicable child buffer indicies will be added to one end
@@ -221,7 +227,12 @@ struct SearchContext {
      */
     uint32_t process_queue_buffer[max_block_process];
 
-    SearchContext() {
+    int original_priority;
+
+    std::thread l3_thread;
+    std::atomic<bool> shutting_down;
+
+    SearchContext() : shutting_down(false) {
     }
 };
 
@@ -589,6 +600,20 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int
     return result;
 }
 
+void keep_l3_alive(SearchContext* sc) {
+    auto count = std::min(size_t{ 1000 }, sc->blocks.size() - 1);
+    if (count == 0) {
+        return;
+    }
+
+    int i = 0;
+    while (!sc->shutting_down) {
+        const char* memptr = (const char*)(&sc->aligned_begin[i % count]);
+        _mm_prefetch(memptr, _MM_HINT_T2);
+        _mm_prefetch(memptr + 64, _MM_HINT_T2);
+    }
+}
+
 extern "C" {
 
 __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin, const Point* points_end) {
@@ -616,6 +641,13 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
 
     std::memmove((void*)aligned, (void*)begin, blockcount * sizeof(block));
     sc->aligned_begin = blockcount ? (block*)aligned : nullptr;
+
+    HANDLE thread = GetCurrentThread();
+    sc->original_priority = GetThreadPriority(thread);
+    SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
+
+
+    //sc->l3_thread = std::thread(keep_l3_alive, sc);
 
 #ifndef NDEBUG
     sc->points = points;
@@ -965,6 +997,11 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 /** Free memory used by search context.
 */
 __declspec(dllexport) SearchContext* __stdcall destroy(SearchContext* sc) {
+    HANDLE thread = GetCurrentThread();
+    SetThreadPriority(thread, sc->original_priority);
+
+    sc->shutting_down = true;
+    //sc->l3_thread.join();
     delete sc;
     return nullptr;
 };
