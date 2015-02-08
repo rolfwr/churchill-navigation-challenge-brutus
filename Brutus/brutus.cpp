@@ -210,6 +210,9 @@ struct SearchContext {
      */
     block* aligned_begin;
 
+    __m128i shuffles[256];
+    uint8_t advances[256];
+
     /** Queue of unprocessed blocks.
      *
      * During search, applicable child buffer indicies will be added to one end
@@ -490,7 +493,7 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int
     int available = (int)std::distance(begin, end);
     int count;
     if (available > maxpoints) {
-            count = maxpoints;
+count = maxpoints;
     }
     else
     {
@@ -531,7 +534,7 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int
     // Fill in the vector sets with available points.
     for (int i = 0; i < candidates.size(); ++i) {
         Point& p = candidates[i];
-        vectorset& vs = b.vectors[i/points_per_vectorset];
+        vectorset& vs = b.vectors[i / points_per_vectorset];
         vs.xs[i % points_per_vectorset] = p.x;
         vs.ys[i % points_per_vectorset] = p.y;
         vs.rankid[i % points_per_vectorset] = (((uint32_t)p.rank) << 8) | (((uint32_t)p.id) & 0xFF);
@@ -589,6 +592,36 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int
     return result;
 }
 
+struct shuffle_result
+{
+    __m128i shuffle;
+    uint8_t advance;
+};
+
+shuffle_result shuffle_precalc(uint8_t enqueuemask) {
+    shuffle_result result;
+    bool enqueue0 = (enqueuemask & (lxbit | lybit | lxlybit)) == 0;
+    bool enqueue1 = (enqueuemask & (lxbit | nhybit | lxhybit)) == 0;
+    bool enqueue2 = (enqueuemask & (nhxbit | lybit | hxlybit)) == 0;
+    bool enqueue3 = (enqueuemask & (nhxbit | nhybit | hxhybit)) == 0;
+    int bm = (enqueue0 << 0) | (enqueue1 << 1) | (enqueue2 << 2) | (enqueue3 << 3);
+    result.advance = (uint8_t)__popcnt(bm);
+    unsigned long index0;
+    _BitScanForward(&index0, bm);
+    bm &= bm - 1;
+    unsigned long index1;
+    _BitScanForward(&index1, bm);
+    bm &= bm - 1;
+    unsigned long index2;
+    _BitScanForward(&index2, bm);
+    bm &= bm - 1;
+    unsigned long index3;
+    _BitScanForward(&index3, bm);
+    result.shuffle = _mm_set_epi32(index3, index2, index1, index0);
+    return result;
+}
+
+
 extern "C" {
 
 __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin, const Point* points_end) {
@@ -607,6 +640,12 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     int bindex = enblock(sc->blocks, &points.data()[0], &points.data()[count], 0).block_index;
     assert(bindex == 0);
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
+
+    for (int i = 0; i < 256; ++i) {
+        shuffle_result sr = shuffle_precalc((uint8_t)i);
+        sc->shuffles[i] = sr.shuffle;
+        sc->advances[i] = sr.advance;
+    }
 
     size_t blockcount = sc->blocks.size();
     sc->blocks.push_back(block{}); // alignment padding;
@@ -901,33 +940,15 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             }
         }
 
-        // If we don't see any rank values that are lower than the rank
-        // highest value we've already found, then we know that there is no
-        // reason to examine any of the child blocks, since they will only
-        // contain even higher rank values.
-        //
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (b->best_child_rank < worst_rank) {
-            if ((enqueuemask & (lxbit | lybit | lxlybit)) == 0) {
-                assert(b->children[lxly]);
-                queue.enqueue(sc, b->children[lxly]);
-            }
-
-            if ((enqueuemask & (lxbit | nhybit | lxhybit)) == 0) {
-                assert(b->children[lxhy]);
-                queue.enqueue(sc, b->children[lxhy]);
-            }
-
-            if ((enqueuemask & (nhxbit | lybit | hxlybit)) == 0) {
-                assert(b->children[hxly]);
-                queue.enqueue(sc, b->children[hxly]);
-            }
-
-            if ((enqueuemask & (nhxbit | nhybit | hxhybit)) == 0) {
-                assert(b->children[hxhy]);
-                queue.enqueue(sc, b->children[hxhy]);
-            }
+            int advance = sc->advances[enqueuemask];
+            __m128i shuffle = sc->shuffles[enqueuemask];
+            __m128 childreni = _mm_load_ps((float const*)&b->children[0]);
+            __m128 write = _mm_permutevar_ps(childreni, shuffle);            
+            _mm_storeu_ps((float*)&queue.buffer[queue.enqueue_index], write);
+            queue.enqueue_index += advance;
         }
 
     nextinqueue:
