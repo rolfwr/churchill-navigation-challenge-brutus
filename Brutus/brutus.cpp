@@ -490,14 +490,7 @@ enblock_result enblock(std::vector<block>& blocks, Point* begin, Point* end, int
 
     const int maxpoints = points_per_vectorset * vectorsets_per_block;
     int available = (int)std::distance(begin, end);
-    int count;
-    if (available > maxpoints) {
-count = maxpoints;
-    }
-    else
-    {
-        count = available;
-    }
+    int count = std::min(maxpoints, available);
 
     int remaining = available - count;
     if (count == 0) {
@@ -587,17 +580,10 @@ count = maxpoints;
     }
 
     assert(((blocks[result.block_index].best_child_rank ^ negmask) & 0x0f) == 0);
-
     return result;
 }
 
-struct shuffle_result
-{
-    __m128i shuffle;
-};
-
-shuffle_result shuffle_precalc(uint8_t enqueuemask) {
-    shuffle_result result;
+__m128i shuffle_precalc(uint8_t enqueuemask) {
     bool enqueue0 = (enqueuemask & (lxbit | lybit | lxlybit)) == 0;
     bool enqueue1 = (enqueuemask & (lxbit | nhybit | lxhybit)) == 0;
     bool enqueue2 = (enqueuemask & (nhxbit | lybit | hxlybit)) == 0;
@@ -615,10 +601,8 @@ shuffle_result shuffle_precalc(uint8_t enqueuemask) {
     bm &= bm - 1;
     unsigned long index3;
     _BitScanForward(&index3, bm);
-    result.shuffle = _mm_set_epi32(index3, index2, index1, index0 | (advance << 8));
-    return result;
+    return _mm_set_epi32(index3, index2, index1, index0 | (advance << 8));
 }
-
 
 extern "C" {
 
@@ -640,8 +624,7 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     assert(sc->blocks.size() >= (size_t)(count / (points_per_vectorset*vectorsets_per_block)));
 
     for (int i = 0; i < 256; ++i) {
-        shuffle_result sr = shuffle_precalc((uint8_t)i);
-        sc->shuffles[i] = sr.shuffle;
+        sc->shuffles[i] = shuffle_precalc((uint8_t)i);
     }
 
     size_t blockcount = sc->blocks.size();
