@@ -211,7 +211,6 @@ struct SearchContext {
     block* aligned_begin;
 
     __m128i shuffles[256];
-    uint8_t advances[256];
 
     /** Queue of unprocessed blocks.
      *
@@ -595,7 +594,6 @@ count = maxpoints;
 struct shuffle_result
 {
     __m128i shuffle;
-    uint8_t advance;
 };
 
 shuffle_result shuffle_precalc(uint8_t enqueuemask) {
@@ -605,7 +603,7 @@ shuffle_result shuffle_precalc(uint8_t enqueuemask) {
     bool enqueue2 = (enqueuemask & (nhxbit | lybit | hxlybit)) == 0;
     bool enqueue3 = (enqueuemask & (nhxbit | nhybit | hxhybit)) == 0;
     int bm = (enqueue0 << 0) | (enqueue1 << 1) | (enqueue2 << 2) | (enqueue3 << 3);
-    result.advance = (uint8_t)__popcnt(bm);
+    int advance = (uint8_t)__popcnt(bm);
     unsigned long index0;
     _BitScanForward(&index0, bm);
     bm &= bm - 1;
@@ -617,7 +615,7 @@ shuffle_result shuffle_precalc(uint8_t enqueuemask) {
     bm &= bm - 1;
     unsigned long index3;
     _BitScanForward(&index3, bm);
-    result.shuffle = _mm_set_epi32(index3, index2, index1, index0);
+    result.shuffle = _mm_set_epi32(index3, index2, index1, index0 | (advance << 8));
     return result;
 }
 
@@ -644,7 +642,6 @@ __declspec(dllexport) SearchContext* __stdcall create(const Point* points_begin,
     for (int i = 0; i < 256; ++i) {
         shuffle_result sr = shuffle_precalc((uint8_t)i);
         sc->shuffles[i] = sr.shuffle;
-        sc->advances[i] = sr.advance;
     }
 
     size_t blockcount = sc->blocks.size();
@@ -943,12 +940,11 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (b->best_child_rank < worst_rank) {
-            int advance = sc->advances[enqueuemask];
             __m128i shuffle = sc->shuffles[enqueuemask];
             __m128 childreni = _mm_load_ps((float const*)&b->children[0]);
             __m128 write = _mm_permutevar_ps(childreni, shuffle);            
             _mm_storeu_ps((float*)&queue.buffer[queue.enqueue_index], write);
-            queue.enqueue_index += advance;
+            queue.enqueue_index += shuffle.m128i_i8[1];
         }
 
     nextinqueue:
