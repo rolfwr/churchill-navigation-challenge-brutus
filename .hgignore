@@ -12,9 +12,11 @@
 \.lib$
 \.orig$
 \.7z$
+^x64$
 ^DancingBrutus$
 ^SwingingBrutus$
 ^DancingBrutusL$
 ^SwingingBrutusL$
 ^WaltzingBrutus$
+^TwistingBrutus$
 ^log.txt$

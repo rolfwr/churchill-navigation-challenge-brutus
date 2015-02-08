@@ -70,7 +70,7 @@ const int vectorsets_per_block = 1;
  * This is a tuneable parameter. On my machine values in the range between
  * 30 and 50 gives the results.
  */
-const int l1_prefetch_block_count = 40;
+const int l1_prefetch_block_count = 27;
 
 /** Maximum number of blocks that needs to be processed during a search.
  *
