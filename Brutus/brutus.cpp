@@ -877,6 +877,10 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             }
         }
 
+        __m128d pivot_xyxy = _mm_loaddup_pd((double const*)&b->pivot.x);
+        __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, _mm_castpd_ps(pivot_xyxy));
+        uint8_t mask = (((uint8_t)_mm_movemask_ps(lessthan)) ^ ((uint8_t)b->best_child_rank));
+
         unsigned long index;
         while (_BitScanForward(&index, pushmask)) {
             // On machines with BMI1 instruction set support, this could be
@@ -894,7 +898,6 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
             {
                 goto nextinqueue;
             }
-
         }
 
         // If we don't see any rank values that are lower than the rank
@@ -905,9 +908,6 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (b->best_child_rank < worst_rank) {
-            __m128d pivot_xyxy = _mm_loaddup_pd((double const*)&b->pivot.x);
-            __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, _mm_castpd_ps(pivot_xyxy));            
-            uint8_t mask = (((uint8_t)_mm_movemask_ps(lessthan)) ^ ((uint8_t)b->best_child_rank));
             if ((mask & (lxbit | lybit | lxlybit)) == 0) {
                 assert(b->children[lxly]);
                 queue.enqueue(sc, b->children[lxly]);
