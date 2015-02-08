@@ -879,18 +879,19 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
 
         __m128d pivot_xyxy = _mm_loaddup_pd((double const*)&b->pivot.x);
         __m128 lessthan = _mm_cmplt_ps(rect_lxlyhxhy, _mm_castpd_ps(pivot_xyxy));
-        uint8_t mask = (((uint8_t)_mm_movemask_ps(lessthan)) ^ ((uint8_t)b->best_child_rank));
+        uint8_t enqueuemask = (((uint8_t)_mm_movemask_ps(lessthan)) ^ ((uint8_t)b->best_child_rank));
 
         unsigned long index;
         while (_BitScanForward(&index, pushmask)) {
-            // On machines with BMI1 instruction set support, this could be
-            // replaced with _blsr_u32().
-            pushmask &= pushmask - 1;
-
             if (worst_rank > vs.rankid[index]) {
                 assert(b->best_block_rank < worst_rank);
 
                 pop_heap_raw_specialized((char*)(void*)bestheap);
+
+                // On machines with BMI1 instruction set support, this could be
+                // replaced with _blsr_u32().
+                pushmask &= pushmask - 1;
+
                 push_heap(bestheap, vs.rankid[index], vs.xs[index], vs.ys[index]);
                 worst_rank = bestheap->rankid;
             }
@@ -908,22 +909,22 @@ __declspec(dllexport) int32_t __stdcall search_fast(SearchContext* sc, const Rec
         // Queue up child blocks only if there is a possiblity for finding
         // points with lower rank values in them.
         if (b->best_child_rank < worst_rank) {
-            if ((mask & (lxbit | lybit | lxlybit)) == 0) {
+            if ((enqueuemask & (lxbit | lybit | lxlybit)) == 0) {
                 assert(b->children[lxly]);
                 queue.enqueue(sc, b->children[lxly]);
             }
 
-            if ((mask & (lxbit | nhybit | lxhybit)) == 0) {
+            if ((enqueuemask & (lxbit | nhybit | lxhybit)) == 0) {
                 assert(b->children[lxhy]);
                 queue.enqueue(sc, b->children[lxhy]);
             }
 
-            if ((mask & (nhxbit | lybit | hxlybit)) == 0) {
+            if ((enqueuemask & (nhxbit | lybit | hxlybit)) == 0) {
                 assert(b->children[hxly]);
                 queue.enqueue(sc, b->children[hxly]);
             }
 
-            if ((mask & (nhxbit | nhybit | hxhybit)) == 0) {
+            if ((enqueuemask & (nhxbit | nhybit | hxhybit)) == 0) {
                 assert(b->children[hxhy]);
                 queue.enqueue(sc, b->children[hxhy]);
             }
