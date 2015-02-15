@@ -15,7 +15,7 @@ which ended up in third place if you want to see a better algorithmic solution.
 However it was interesting seeing how much speed improvements was possible by
 gradually performing mostly non-algorithmic optimizations.
 
-![Improvements graph](images/improvements.png)
+![improvements.png](https://bitbucket.org/repo/Rj8jdk/images/3546633172-improvements.png)
 
 The final search algorithm was basically in place already at revision tag B2,
 but the implementation got quite a lot faster by applying optimizations such
